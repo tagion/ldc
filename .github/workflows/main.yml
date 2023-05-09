@@ -2,9 +2,9 @@
 
 name: Main
 on:
-  - pull_request
-  - push
-  - workflow-dispatch
+  pull_request:
+  push:
+  workflow-dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
