@@ -38,7 +38,7 @@ set(BUILD_SHARED_LIBS     AUTO                                CACHE STRING "Whet
 set(D_FLAGS               -w;-de;-preview=dip1000;-preview=dtorfields;-preview=fieldwise CACHE STRING "Runtime D compiler flags, separated by ';'")
 set(D_EXTRA_FLAGS         ""                                  CACHE STRING "Runtime extra D compiler flags, separated by ';'")
 set(D_FLAGS_DEBUG         -g;-link-defaultlib-debug;-d-debug  CACHE STRING "Runtime D compiler flags (debug libraries), separated by ';'")
-set(D_FLAGS_RELEASE       -O3;-release                        CACHE STRING "Runtime D compiler flags (release libraries), separated by ';'")
+set(D_FLAGS_RELEASE       -O3;-release;-femit-local-var-lifetime  CACHE STRING "Runtime D compiler flags (release libraries), separated by ';'")
 set(COMPILE_ALL_D_FILES_AT_ONCE ON                            CACHE BOOL   "Compile all D files for the runtime libs in a single command line instead of separately. Disabling this is useful for many CPU cores and/or iterative development.")
 set(RT_ARCHIVE_WITH_LDC   ON                                  CACHE STRING "Whether to archive the static runtime libs via LDC instead of CMake archiver")
 set(RT_CFLAGS             ""                                  CACHE STRING "Runtime extra C compiler flags, separated by ' '")
@@ -450,6 +450,15 @@ macro(dc src_files src_basedir d_flags output_basedir emit_bc all_at_once single
                 set(new_bc ${output_basedir}/${single_obj_name}.bc${CMAKE_C_OUTPUT_EXTENSION})
             endif()
             list(APPEND dc_flags -of=${new_o})
+        endif()
+
+        # Use a response file on Windows, in order not to exceed the max command-line length.
+        if(WIN32)
+            set(first_obj "")
+            list(GET new_o 0 first_obj)
+            string(REPLACE ";" " " relative_src_files "${relative_src_files}")
+            file(WRITE ${first_obj}.rsp ${relative_src_files})
+            set(relative_src_files "@${first_obj}.rsp")
         endif()
 
         add_custom_command(

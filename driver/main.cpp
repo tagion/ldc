@@ -29,6 +29,7 @@
 #include "driver/cl_options_sanitizers.h"
 #include "driver/codegenerator.h"
 #include "driver/configfile.h"
+#include "driver/cpreprocessor.h"
 #include "driver/dcomputecodegenerator.h"
 #include "driver/exe_path.h"
 #include "driver/ldc-version.h"
@@ -439,10 +440,8 @@ void parseCommandLine(Strings &sourceFiles) {
   if (global.params.useDIP1000 == FeatureState::enabled) // DIP1000 implies DIP25
     global.params.useDIP25 = FeatureState::enabled;
   // legacy -dip25 option
-  if (global.params.useDIP25 == FeatureState::default_ &&
-      opts::useDIP25.getNumOccurrences()) {
-    global.params.useDIP25 =
-        opts::useDIP25 ? FeatureState::enabled : FeatureState::disabled;
+  if (opts::useDIP25.getNumOccurrences()) {
+    deprecation(Loc(), "`-dip25` no longer has any effect");
   }
 
   global.params.output_o =
@@ -1184,6 +1183,8 @@ int cppmain() {
     global.params.dllexport = false;
     global.params.dllimport = DLLImport::none;
   }
+
+  global.preprocess = &runCPreprocessor;
 
   // allocate the target abi
   gABI = TargetABI::getTarget();

@@ -250,8 +250,8 @@ public:
     decl->ir->setDefined();
 
     // just forward aliases
-    if (decl->aliassym) {
-      Logger::println("alias sym");
+    if (decl->aliasTuple) {
+      Logger::println("aliasTuple");
       decl->toAlias()->accept(this);
       return;
     }
@@ -284,7 +284,9 @@ public:
 
   void visit(FuncDeclaration *decl) override {
     // don't touch function aliases, they don't contribute any new symbols
-    if (!decl->isFuncAliasDeclaration()) {
+    if (!decl->skipCodegen() && !decl->isFuncAliasDeclaration() &&
+        // skip fwd declarations (IR-declared lazily)
+        decl->fbody) {
       DtoDefineFunction(decl);
     }
   }

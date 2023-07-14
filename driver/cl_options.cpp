@@ -163,6 +163,12 @@ static cl::opt<MessageStyle, true> verrorStyle(
                    "standard used by gcc and clang")),
     cl::init(MessageStyle::digitalmars));
 
+static cl::opt<unsigned, true>
+    verrorSupplements("verror-supplements", cl::ZeroOrMore,
+                      cl::location(global.params.errorSupplementLimit),
+                      cl::desc("Limit the number of supplemental messages for "
+                               "each error (0 means unlimited)"));
+
 static cl::opt<Diagnostic, true> warnings(
     cl::desc("Warnings:"), cl::ZeroOrMore, cl::location(global.params.warnings),
     cl::values(
@@ -394,16 +400,18 @@ cl::list<std::string>
                    cl::value_desc("linkerflag"), cl::cat(linkingCategory),
                    cl::Prefix);
 
-cl::list<std::string>
-    ccSwitches("Xcc", cl::desc("Pass <ccflag> to GCC/Clang for linking"),
-               cl::value_desc("ccflag"), cl::cat(linkingCategory));
+cl::list<std::string> ccSwitches(
+    "Xcc", cl::value_desc("ccflag"), cl::cat(linkingCategory),
+    cl::desc("Pass <ccflag> to GCC/Clang for linking/preprocessing"));
 
-cl::opt<std::string>
-    moduleDeps("deps", cl::ValueOptional, cl::ZeroOrMore,
-               cl::value_desc("filename"),
-               cl::desc("Write module dependencies to <filename> (only imports). "
-                        "'-deps' alone prints module dependencies "
-                        "(imports/file/version/debug/lib)"));
+cl::list<std::string> cppSwitches("P", cl::value_desc("cppflag"), cl::Prefix,
+                                  cl::desc("Pass <cppflag> to C preprocessor"));
+
+cl::opt<std::string> moduleDeps(
+    "deps", cl::ValueOptional, cl::ZeroOrMore, cl::value_desc("filename"),
+    cl::desc("Write module dependencies to <filename> (only imports). "
+             "'-deps' alone prints module dependencies "
+             "(imports/file/version/debug/lib)"));
 
 cl::opt<std::string>
     makeDeps("makedeps", cl::ValueOptional, cl::ZeroOrMore,
