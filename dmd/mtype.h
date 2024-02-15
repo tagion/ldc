@@ -1,6 +1,6 @@
 
 /* Compiler implementation of the D programming language
- * Copyright (C) 1999-2023 by The D Language Foundation, All Rights Reserved
+ * Copyright (C) 1999-2024 by The D Language Foundation, All Rights Reserved
  * written by Walter Bright
  * https://www.digitalmars.com
  * Distributed under the Boost Software License, Version 1.0.
@@ -41,8 +41,7 @@ using type = class IrType;
 typedef struct TYPE type;
 #endif
 
-void semanticTypeInfo(Scope *sc, Type *t);
-
+extern const char* toChars(const Type* const t);
 Type *typeSemantic(Type *t, const Loc &loc, Scope *sc);
 Type *merge(Type *type);
 
@@ -125,8 +124,9 @@ enum VarArgValues
 {
     VARARGnone     = 0,  /// fixed number of arguments
     VARARGvariadic = 1,  /// T t, ...)  can be C-style (core.stdc.stdarg) or D-style (core.vararg)
-    VARARGtypesafe = 2   /// T t ...) typesafe https://dlang.org/spec/function.html#typesafe_variadic_functions
+    VARARGtypesafe = 2,  /// T t ...) typesafe https://dlang.org/spec/function.html#typesafe_variadic_functions
                          ///   or https://dlang.org/spec/function.html#typesafe_variadic_functions
+    VARARGKRvariadic = 3 /// K+R C style variadics (no function prototype)
 };
 typedef unsigned char VarArg;
 
@@ -231,7 +231,6 @@ public:
     // kludge for template.isType()
     DYNCAST dyncast() const override final { return DYNCAST_TYPE; }
     size_t getUniqueID() const;
-    Covariant covariant(Type *, StorageClass * = NULL, bool = false);
     const char *toChars() const override;
     char *toPrettyChars(bool QualifyTypes = false);
     static void _init();
@@ -241,7 +240,7 @@ public:
     virtual unsigned alignsize();
     Type *trySemantic(const Loc &loc, Scope *sc);
     Type *merge2();
-    void modToBuffer(OutBuffer *buf) const;
+    void modToBuffer(OutBuffer& buf) const;
     char *modToChars() const;
 
     virtual bool isintegral();
@@ -255,7 +254,6 @@ public:
     virtual bool isString();
     virtual bool isAssignable();
     virtual bool isBoolean();
-    virtual void checkDeprecated(const Loc &loc, Scope *sc);
     bool isConst() const       { return (mod & MODconst) != 0; }
     bool isImmutable() const   { return (mod & MODimmutable) != 0; }
     bool isMutable() const     { return (mod & (MODconst | MODimmutable | MODwild)) == 0; }
@@ -276,9 +274,6 @@ public:
     Type *wildConstOf();
     Type *sharedWildOf();
     Type *sharedWildConstOf();
-    void fixTo(Type *t);
-    void check();
-    Type *addSTC(StorageClass stc);
     Type *castMod(MOD mod);
     Type *addMod(MOD mod);
     virtual Type *addStorageClass(StorageClass stc);
@@ -320,7 +315,6 @@ public:
     virtual bool hasInvariant();
     virtual Type *nextOf();
     Type *baseElemOf();
-    uinteger_t sizemask();
     virtual bool needsDestruction();
     virtual bool needsCopyOrPostblit();
     virtual bool needsNested();
@@ -374,7 +368,6 @@ class TypeNext : public Type
 public:
     Type *next;
 
-    void checkDeprecated(const Loc &loc, Scope *sc) override final;
     int hasWild() const override final;
     Type *nextOf() override final;
     Type *makeConst() override final;
@@ -567,13 +560,14 @@ enum class PURE : unsigned char
 class Parameter final : public ASTNode
 {
 public:
+    Loc loc;
     StorageClass storageClass;
     Type *type;
     Identifier *ident;
     Expression *defaultArg;
     UserAttributeDeclaration *userAttribDecl;   // user defined attributes
 
-    static Parameter *create(StorageClass storageClass, Type *type, Identifier *ident,
+    static Parameter *create(const Loc &loc, StorageClass storageClass, Type *type, Identifier *ident,
                              Expression *defaultArg, UserAttributeDeclaration *userAttribDecl);
     Parameter *syntaxCopy();
     Type *isLazyArray();
@@ -594,7 +588,7 @@ struct ParameterList
     Parameters* parameters;
     StorageClass stc;
     VarArg varargs;
-    bool hasIdentifierList; // true if C identifier-list style
+    d_bool hasIdentifierList; // true if C identifier-list style
 
     size_t length();
     Parameter *operator[](size_t i) { return Parameter::getNth(parameters, i); }
@@ -619,7 +613,7 @@ public:
     void purityLevel();
     bool hasLazyParameters();
     bool isDstyleVariadic() const;
-    StorageClass parameterStorageClass(Parameter *p);
+    StorageClass parameterStorageClass(Type* tthis, Parameter *p, VarDeclarations* outerVars = nullptr, bool indirect = false);
     Type *addStorageClass(StorageClass stc) override;
 
     Type *substWildTo(unsigned mod) override;
@@ -710,10 +704,6 @@ public:
     // representing ident.ident!tiargs.ident. ... etc.
     Objects idents;
 
-    void syntaxCopyHelper(TypeQualified *t);
-    void addIdent(Identifier *ident);
-    void addInst(TemplateInstance *inst);
-    void addIndex(RootObject *expr);
     uinteger_t size(const Loc &loc) override;
 
     void accept(Visitor *v) override { v->visit(this); }
@@ -784,7 +774,7 @@ class TypeStruct final : public Type
 public:
     StructDeclaration *sym;
     AliasThisRec att;
-    bool inuse;
+    d_bool inuse;
 
     static TypeStruct *create(StructDeclaration *sym);
     const char *kind() override;
@@ -940,7 +930,6 @@ public:
 
 /**************************************************************/
 
-bool arrayTypeCompatibleWithoutCasting(Type *t1, Type *t2);
-
 // If the type is a class or struct, returns the symbol for it, else null.
 AggregateDeclaration *isAggregate(Type *t);
+Covariant covariant(Type *, Type *, StorageClass * = NULL, bool = false);

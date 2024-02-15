@@ -20,7 +20,11 @@
 #include "driver/cl_options_sanitizers.h"
 #include "driver/plugins.h"
 #include "driver/targetmachine.h"
+#if LDC_LLVM_VER < 1700
 #include "llvm/ADT/Triple.h"
+#else
+#include "llvm/TargetParser/Triple.h"
+#endif
 #include "llvm/Analysis/InlineCost.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
@@ -34,7 +38,9 @@
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/Instrumentation.h"
 #include "llvm/Transforms/IPO.h"
+#if LDC_LLVM_VER < 1700
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
+#endif
 #include "llvm/Transforms/Instrumentation/MemorySanitizer.h"
 #include "llvm/Transforms/Instrumentation/ThreadSanitizer.h"
 #include "llvm/Transforms/Instrumentation/AddressSanitizer.h"
@@ -49,9 +55,7 @@
 #include "llvm/Transforms/Scalar/LICM.h"
 #include "llvm/Transforms/Scalar/Reassociate.h"
 #endif
-#if LDC_LLVM_VER >= 1000
 #include "llvm/Transforms/Instrumentation/SanitizerCoverage.h"
-#endif
 
 extern llvm::TargetMachine *gTargetMachine;
 using namespace llvm;
@@ -141,15 +145,6 @@ bool willCrossModuleInline() {
   return enableCrossModuleInlining == llvm::cl::BOU_TRUE && willInline();
 }
 
-#if LDC_LLVM_VER < 1000
-llvm::FramePointer::FP whichFramePointersToEmit() {
-  if (auto option = opts::framePointerUsage())
-    return *option;
-  return isOptimizationEnabled() ? llvm::FramePointer::None
-                                 : llvm::FramePointer::All;
-}
-#endif
-
 bool isOptimizationEnabled() { return optimizeLevel != 0; }
 
 llvm::CodeGenOpt::Level codeGenOptLevel() {
@@ -238,13 +233,8 @@ static void legacyAddThreadSanitizerPass(const PassManagerBuilder &Builder,
 
 static void legacyAddSanitizerCoveragePass(const PassManagerBuilder &Builder,
                                      legacy::PassManagerBase &PM) {
-#if LDC_LLVM_VER >= 1000
   PM.add(createModuleSanitizerCoverageLegacyPassPass(
       opts::getSanitizerCoverageOptions()));
-#else
-  PM.add(
-      createSanitizerCoverageModulePass(opts::getSanitizerCoverageOptions()));
-#endif
 }
 
 // Adds PGO instrumentation generation and use passes.
@@ -560,22 +550,41 @@ static void addGarbageCollect2StackPass(ModulePassManager &mpm,
 
 
 static llvm::Optional<PGOOptions> getPGOOptions() {
- //FIXME: Do we have these anywhere?
- bool debugInfoForProfiling=false;
- bool pseudoProbeForProfiling=false;
- if (opts::isInstrumentingForIRBasedPGO()) {
-    return PGOOptions(global.params.datafileInstrProf, "", "",
-                     PGOOptions::PGOAction::IRInstr,
-                     PGOOptions::CSPGOAction::NoCSAction,
-                     debugInfoForProfiling, pseudoProbeForProfiling);
+  // FIXME: Do we have these anywhere?
+  bool debugInfoForProfiling = false;
+  bool pseudoProbeForProfiling = false;
+  if (opts::isInstrumentingForIRBasedPGO()) {
+    return PGOOptions(
+        global.params.datafileInstrProf, "", "",
+#if LDC_LLVM_VER >= 1700
+        "" /*MemoryProfileUsePath*/, llvm::vfs::getRealFileSystem(),
+#endif
+        PGOOptions::PGOAction::IRInstr, PGOOptions::CSPGOAction::NoCSAction,
+        debugInfoForProfiling, pseudoProbeForProfiling);
   } else if (opts::isUsingIRBasedPGOProfile()) {
-    return PGOOptions(global.params.datafileInstrProf, "", "",
-                     PGOOptions::PGOAction::IRUse,
-                     PGOOptions::CSPGOAction::NoCSAction,
-                     debugInfoForProfiling, pseudoProbeForProfiling);
+    return PGOOptions(
+        global.params.datafileInstrProf, "", "",
+#if LDC_LLVM_VER >= 1700
+        "" /*MemoryProfileUsePath*/, llvm::vfs::getRealFileSystem(),
+#endif
+        PGOOptions::PGOAction::IRUse, PGOOptions::CSPGOAction::NoCSAction,
+        debugInfoForProfiling, pseudoProbeForProfiling);
+  } else if (opts::isUsingSampleBasedPGOProfile()) {
+    return PGOOptions(
+        global.params.datafileInstrProf, "", "",
+#if LDC_LLVM_VER >= 1700
+        "" /*MemoryProfileUsePath*/, llvm::vfs::getRealFileSystem(),
+#endif
+        PGOOptions::PGOAction::SampleUse, PGOOptions::CSPGOAction::NoCSAction,
+        debugInfoForProfiling, pseudoProbeForProfiling);
   }
+#if LDC_LLVM_VER < 1600
   return None;
+#else
+  return std::nullopt;
+#endif
 }
+
 static PipelineTuningOptions getPipelineTuningOptions(unsigned optLevelVal, unsigned sizeLevelVal) {
   PipelineTuningOptions pto;
 
@@ -637,9 +646,17 @@ void runOptimizationPasses(llvm::Module *M) {
   bool debugLogging = false;
   ppo.Indent = false;
   ppo.SkipAnalyses = false;
+#if LDC_LLVM_VER < 1600
   StandardInstrumentations si(debugLogging, /*VerifyEach=*/false, ppo);
+#else
+  StandardInstrumentations si(M->getContext(), debugLogging, /*VerifyEach=*/false, ppo);
+#endif
 
+#if LDC_LLVM_VER < 1700
   si.registerCallbacks(pic, &fam);
+#else
+  si.registerCallbacks(pic, &mam);
+#endif
 
   PassBuilder pb(gTargetMachine, getPipelineTuningOptions(optLevelVal, sizeLevelVal),
                  getPGOOptions(), &pic);

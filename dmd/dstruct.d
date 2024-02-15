@@ -3,7 +3,7 @@
  *
  * Specification: $(LINK2 https://dlang.org/spec/struct.html, Structs, Unions)
  *
- * Copyright:   Copyright (C) 1999-2023 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2024 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 https://www.digitalmars.com, Walter Bright)
  * License:     $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
  * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/dstruct.d, _dstruct.d)
@@ -12,6 +12,8 @@
  */
 
 module dmd.dstruct;
+
+import core.stdc.stdio;
 
 import dmd.aggregate;
 import dmd.arraytypes;
@@ -69,13 +71,13 @@ extern (C++) FuncDeclaration search_toString(StructDeclaration sd)
  *      sc = context
  *      t = type that TypeInfo is being generated for
  */
-extern (C++) void semanticTypeInfo(Scope* sc, Type t)
+extern (D) void semanticTypeInfo(Scope* sc, Type t)
 {
     if (sc)
     {
         if (sc.intypeof)
             return;
-        if (sc.flags & (SCOPE.ctfe | SCOPE.compile | SCOPE.ctfeBlock))
+        if (!sc.needsCodegen())
             return;
     }
 
@@ -103,6 +105,7 @@ extern (C++) void semanticTypeInfo(Scope* sc, Type t)
         if (!sc) // inline may request TypeInfo.
         {
             Scope scx;
+            scx.eSink = global.errorSink;
             scx._module = sd.getModule();
             getTypeInfoType(sd.loc, t, &scx);
 version (IN_LLVM) {} else
@@ -269,23 +272,6 @@ version (IN_LLVM) {} else
         return sd;
     }
 
-    override final Dsymbol search(const ref Loc loc, Identifier ident, int flags = SearchLocalsOnly)
-    {
-        //printf("%s.StructDeclaration::search('%s', flags = x%x)\n", toChars(), ident.toChars(), flags);
-        if (_scope && !symtab)
-            dsymbolSemantic(this, _scope);
-
-        if (!members || !symtab) // opaque or semantic() is not yet called
-        {
-            // .stringof is always defined (but may be hidden by some other symbol)
-            if(ident != Id.stringof && !(flags & IgnoreErrors) && semanticRun < PASS.semanticdone)
-                error("is forward referenced when looking for `%s`", ident.toChars());
-            return null;
-        }
-
-        return ScopeDsymbol.search(loc, ident, flags);
-    }
-
     override const(char)* kind() const
     {
         return "struct";
@@ -312,7 +298,7 @@ version (IN_LLVM) {} else
         for (size_t i = 0; i < members.length; i++)
         {
             Dsymbol s = (*members)[i];
-            s.setFieldOffset(this, fieldState, isunion);
+            s.setFieldOffset(this, &fieldState, isunion);
         }
         if (type.ty == Terror)
         {
@@ -363,7 +349,7 @@ version (IN_LLVM) {} else
 
         sizeok = Sizeok.done;
 
-        //printf("-StructDeclaration::finalizeSize() %s, fields.length = %d, structsize = %d\n", toChars(), fields.length, structsize);
+        //printf("-StructDeclaration::finalizeSize() %s, fields.length = %d, structsize = %d\n", toChars(), cast(int)fields.length, cast(int)structsize);
 
         if (errors)
             return;
@@ -457,7 +443,11 @@ version (IN_LLVM) {} else
 
         ispod = ThreeState.yes;
 
-        if (enclosing || postblit || dtor || hasCopyCtor)
+        import dmd.clone;
+        bool hasCpCtorLocal;
+        needCopyCtor(this, hasCpCtorLocal);
+
+        if (enclosing || search(this, loc, Id.postblit) || search(this, loc, Id.dtor) || hasCpCtorLocal)
         {
             ispod = ThreeState.no;
             return false;
@@ -576,7 +566,7 @@ version (IN_LLVM) {} else
  * Returns:
  *      true if it's all binary 0
  */
-private bool _isZeroInit(Expression exp)
+bool _isZeroInit(Expression exp)
 {
     switch (exp.op)
     {
@@ -584,20 +574,22 @@ private bool _isZeroInit(Expression exp)
             return exp.toInteger() == 0;
 
         case EXP.null_:
-        case EXP.false_:
             return true;
 
         case EXP.structLiteral:
         {
-            auto sle = cast(StructLiteralExp) exp;
+            auto sle = exp.isStructLiteralExp();
+            if (sle.sd.isNested())
+                return false;
+            const isCstruct = sle.sd.isCsymbol();  // C structs are default initialized to all zeros
             foreach (i; 0 .. sle.sd.fields.length)
             {
                 auto field = sle.sd.fields[i];
                 if (field.type.size(field.loc))
                 {
-                    auto e = (*sle.elements)[i];
+                    auto e = sle.elements && i < sle.elements.length ? (*sle.elements)[i] : null;
                     if (e ? !_isZeroInit(e)
-                          : !field.type.isZeroInit(field.loc))
+                          : !isCstruct && !field.type.isZeroInit(field.loc))
                         return false;
                 }
             }

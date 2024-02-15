@@ -50,6 +50,9 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
+#if LDC_LLVM_VER >= 1700
+#include "llvm/Support/VirtualFileSystem.h"
+#endif
 
 #if _AIX || __sun
 #include <alloca.h>
@@ -279,7 +282,7 @@ void addCoverageAnalysis(Module *m) {
 
   OutBuffer mangleBuf;
   mangleBuf.writestring("_D");
-  mangleToBuffer(m, &mangleBuf);
+  mangleToBuffer(m, mangleBuf);
   mangleBuf.writestring("12_coverageanalysisCtor1FZv");
   const char *ctorname = mangleBuf.peekChars();
 
@@ -354,12 +357,16 @@ void loadInstrProfileData(IRState *irs) {
                            global.params.datafileInstrProf);
 
     auto readerOrErr =
-        llvm::IndexedInstrProfReader::create(global.params.datafileInstrProf);
+        llvm::IndexedInstrProfReader::create(global.params.datafileInstrProf
+#if LDC_LLVM_VER >= 1700
+                                             ,
+                                             *llvm::vfs::getRealFileSystem()
+#endif
+        );
     if (auto E = readerOrErr.takeError()) {
       handleAllErrors(std::move(E), [&](const llvm::ErrorInfoBase &EI) {
-        irs->dmodule->error("Could not read profile file '%s': %s",
-                            global.params.datafileInstrProf,
-                            EI.message().c_str());
+        error(irs->dmodule->loc, "Could not read profile file '%s': %s",
+              global.params.datafileInstrProf, EI.message().c_str());
       });
       fatal();
     }
@@ -383,7 +390,7 @@ void registerModuleInfo(Module *m) {
   const auto style = getModuleRegistryStyle();
 
   OutBuffer mangleBuf;
-  mangleToBuffer(m, &mangleBuf);
+  mangleToBuffer(m, mangleBuf);
   const char *mangle = mangleBuf.peekChars();
 
   if (style == RegistryStyle::legacyLinkedList) {
@@ -393,7 +400,26 @@ void registerModuleInfo(Module *m) {
     emitModuleRefToSection(mangle, moduleInfoSym);
   }
 }
+
+void addModuleFlags(llvm::Module &m) {
+#if LDC_LLVM_VER >= 1500
+  const auto ModuleMinFlag = llvm::Module::Min;
+#else
+  const auto ModuleMinFlag = llvm::Module::Warning; // Fallback value
+#endif
+
+  if (opts::fCFProtection == opts::CFProtectionType::Return ||
+      opts::fCFProtection == opts::CFProtectionType::Full) {
+    m.addModuleFlag(ModuleMinFlag, "cf-protection-return", 1);
+  }
+
+  if (opts::fCFProtection == opts::CFProtectionType::Branch ||
+      opts::fCFProtection == opts::CFProtectionType::Full) {
+    m.addModuleFlag(ModuleMinFlag, "cf-protection-branch", 1);
+  }
 }
+
+} // anonymous namespace
 
 void codegenModule(IRState *irs, Module *m) {
   TimeTraceScope timeScope("Generate IR", m->toChars(), m->loc);
@@ -431,11 +457,13 @@ void codegenModule(IRState *irs, Module *m) {
     fatal();
   }
 
-  // Skip emission of all the additional module metadata if:
-  // a) the -betterC switch is on,
-  // b) requested explicitly by the user via pragma(LDC_no_moduleinfo), or if
-  // c) there's no ModuleInfo declaration.
-  if (global.params.useModuleInfo && !m->noModuleInfo && Module::moduleinfo) {
+  // Skip emission of the ModuleInfo if:
+  // a) the -betterC or -fno-moduleinfo switch is on,
+  // b) requested explicitly by the user via pragma(LDC_no_moduleinfo),
+  // c) there's no ModuleInfo declaration, or if
+  // d) the module is a C file.
+  if (global.params.useModuleInfo && !m->noModuleInfo && Module::moduleinfo &&
+      m->filetype != FileType::c) {
     // generate ModuleInfo
     registerModuleInfo(m);
   }
@@ -443,6 +471,8 @@ void codegenModule(IRState *irs, Module *m) {
   if (m->d_cover_valid) {
     addCoverageAnalysisInitializer(m);
   }
+
+  addModuleFlags(irs->module);
 
   gIR = nullptr;
   irs->dmodule = nullptr;

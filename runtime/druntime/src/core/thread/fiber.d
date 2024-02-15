@@ -153,6 +153,15 @@ private
     {
         version = AlignFiberStackTo16Byte;
     }
+    else version (LoongArch64)
+    {
+        version (Posix)
+        {
+            version = AsmLoongArch64_Posix;
+            version = AsmExternal;
+            version = AlignFiberStackTo16Byte;
+        }
+    }
 
     version (Posix)
     {
@@ -1160,16 +1169,19 @@ private:
     //
     Callable            m_call;
     bool                m_isRunning;
+    version (LDC)
+    {
+        // Unconditionally add this field, that is only used with version(CheckFiberMigration),
+        // such that version(SupportSanitizers) does not change the ABI.
+        // (what is needed is version(SupportSanitizers_ABI || CheckFiberMigration))
+        // The field is positioned after another bool, using up alignment padding space.
+        bool m_allowMigration;
+    }
     Throwable           m_unhandled;
     State               m_state;
 
     // Set first time switchIn called to indicate this Fiber's Thread
     Thread              m_curThread;
-
-    version (CheckFiberMigration)
-    {
-        bool m_allowMigration;
-    }
 
     version (SjLj_Exceptions)
     {
@@ -1810,6 +1822,31 @@ private:
             (cast(ubyte*)pstack - SZ)[0 .. SZ] = 0;
             pstack -= ABOVE;
             *cast(size_t*)(pstack - SZ_RA) = cast(size_t)&fiber_entryPoint;
+        }
+        else version (AsmLoongArch64_Posix)
+        {
+            // Like others, FP registers and return address ($r1) are kept
+            // below the saved stack top (tstack) to hide from GC scanning.
+            // fiber_switchContext expects newp sp to look like this:
+            //   10: $r21 (reserved)
+            //    9: $r22 (frame pointer)
+            //    8: $r23
+            //   ...
+            //    0: $r31 <-- newp tstack
+            //   -1: $r1  (return address)  [&fiber_entryPoint]
+            //   -2: $f24
+            //   ...
+            //   -9: $f31
+
+            version (StackGrowsDown) {}
+            else
+                static assert(false, "Only full descending stacks supported on LoongArch64");
+
+            // Only need to set return address ($r1).  Everything else is fine
+            // zero initialized.
+            pstack -= size_t.sizeof * 11;    // skip past space reserved for $r21-$r31
+            push (cast(size_t) &fiber_entryPoint);
+            pstack += size_t.sizeof;         // adjust sp (newp) above lr
         }
         else version (AsmAArch64_Posix)
         {

@@ -91,15 +91,6 @@ LLValue *DtoNew(const Loc &loc, Type *newtype) {
   return DtoBitCast(mem, DtoPtrToType(newtype), ".gc_mem");
 }
 
-LLValue *DtoNewStruct(const Loc &loc, TypeStruct *newtype) {
-  llvm::Function *fn = getRuntimeFunction(
-      loc, gIR->module,
-      newtype->isZeroInit(newtype->sym->loc) ? "_d_newitemT" : "_d_newitemiT");
-  LLConstant *ti = DtoTypeInfoOf(loc, newtype);
-  LLValue *mem = gIR->CreateCallOrInvoke(fn, ti, ".gc_struct");
-  return DtoBitCast(mem, DtoPtrToType(newtype), ".gc_struct");
-}
-
 void DtoDeleteMemory(const Loc &loc, DValue *ptr) {
   llvm::Function *fn = getRuntimeFunction(loc, gIR->module, "_d_delmemory");
   LLValue *lval = (ptr->isLVal() ? DtoLVal(ptr) : makeLValue(loc, ptr));
@@ -191,7 +182,7 @@ llvm::AllocaInst *DtoArrayAlloca(Type *type, unsigned arraysize,
       lltype, gIR->module.getDataLayout().getAllocaAddrSpace(),
       DtoConstUint(arraysize), name, gIR->topallocapoint());
   if (auto alignment = DtoAlignment(type)) {
-    ai->setAlignment(LLAlign(alignment));
+    ai->setAlignment(llvm::Align(alignment));
   }
   return ai;
 }
@@ -202,7 +193,7 @@ llvm::AllocaInst *DtoRawAlloca(LLType *lltype, size_t alignment,
       lltype, gIR->module.getDataLayout().getAllocaAddrSpace(), name,
       gIR->topallocapoint());
   if (alignment) {
-    ai->setAlignment(LLAlign(alignment));
+    ai->setAlignment(llvm::Align(alignment));
   }
   return ai;
 }
@@ -279,7 +270,7 @@ void DtoAssert(Module *M, const Loc &loc, DValue *msg) {
   args.push_back(DtoModuleFileName(M, loc));
 
   // line param
-  args.push_back(DtoConstUint(loc.linnum));
+  args.push_back(DtoConstUint(loc.linnum()));
 
   // call
   gIR->CreateCallOrInvoke(fn, args);
@@ -291,8 +282,8 @@ void DtoAssert(Module *M, const Loc &loc, DValue *msg) {
 void DtoCAssert(Module *M, const Loc &loc, LLValue *msg) {
   const auto &triple = *global.params.targetTriple;
   const auto file =
-      DtoConstCString(loc.filename ? loc.filename : M->srcfile.toChars());
-  const auto line = DtoConstUint(loc.linnum);
+      DtoConstCString(loc.filename() ? loc.filename() : M->srcfile.toChars());
+  const auto line = DtoConstUint(loc.linnum());
   const auto fn = getCAssertFunction(loc, gIR->module);
 
   llvm::SmallVector<LLValue *, 4> args;
@@ -356,7 +347,7 @@ void DtoThrow(const Loc &loc, DValue *e) {
  ******************************************************************************/
 
 LLConstant *DtoModuleFileName(Module *M, const Loc &loc) {
-  return DtoConstString(loc.filename ? loc.filename : M->srcfile.toChars());
+  return DtoConstString(loc.filename() ? loc.filename() : M->srcfile.toChars());
 }
 
 /******************************************************************************
@@ -1188,7 +1179,7 @@ LLConstant *DtoConstExpInit(const Loc &loc, Type *targetType, Expression *exp) {
       val = llvm::ConstantArray::get(at, elements);
     }
 
-    (void)numTotalVals;
+    (void)numTotalVals; (void) product; // Silence unused variable warning when assert is disabled.
     assert(product == numTotalVals);
     return val;
   }
@@ -1202,10 +1193,8 @@ LLConstant *DtoConstExpInit(const Loc &loc, Type *targetType, Expression *exp) {
         static_cast<TypeSArray *>(tv->basetype)->dim->toInteger();
 #if LDC_LLVM_VER >= 1200
     const auto elementCount = llvm::ElementCount::getFixed(elemCount);
-#elif LDC_LLVM_VER >= 1100
-    const auto elementCount = llvm::ElementCount(elemCount, false);
 #else
-    const auto elementCount = elemCount;
+    const auto elementCount = llvm::ElementCount(elemCount, false);
 #endif
     return llvm::ConstantVector::getSplat(elementCount, val);
   }
@@ -1267,8 +1256,8 @@ static char *DtoOverloadedIntrinsicName(TemplateInstance *ti,
   } else if (T->isintegral()) {
     prefix = 'i';
   } else {
-    ti->error("has invalid template parameter for intrinsic: `%s`",
-              T->toChars());
+    error(ti->loc, "%s `%s` has invalid template parameter for intrinsic: `%s`",
+          ti->kind(), ti->toPrettyChars(), T->toChars());
     fatal(); // or LLVM asserts
   }
 
@@ -1281,11 +1270,7 @@ static char *DtoOverloadedIntrinsicName(TemplateInstance *ti,
   if (dtype->isPPC_FP128Ty()) { // special case
     replacement = "ppcf128";
   } else if (dtype->isVectorTy()) {
-#if LDC_LLVM_VER >= 1100
     auto vectorType = llvm::cast<llvm::FixedVectorType>(dtype);
-#else
-    auto vectorType = llvm::cast<llvm::VectorType>(dtype);
-#endif
     llvm::raw_string_ostream stream(replacement);
     stream << 'v' << vectorType->getNumElements() << prefix
            << gDataLayout->getTypeSizeInBits(vectorType->getElementType());
@@ -1301,13 +1286,15 @@ static char *DtoOverloadedIntrinsicName(TemplateInstance *ti,
     } else {
       if (pos && (name[pos - 1] == 'i' || name[pos - 1] == 'f')) {
         // Wrong type character.
-        ti->error("has invalid parameter type for intrinsic `%s`: `%s` is not "
-                  "a%s type",
-                  name.c_str(), T->toChars(),
-                  (name[pos - 1] == 'i' ? "n integral" : " floating-point"));
+        error(ti->loc,
+              "%s `%s` has invalid parameter type for intrinsic `%s`: `%s` is "
+              "not a%s type",
+              ti->kind(), ti->toPrettyChars(), name.c_str(), T->toChars(),
+              (name[pos - 1] == 'i' ? "n integral" : " floating-point"));
       } else {
         // Just plain wrong. (Error in declaration, not instantiation)
-        td->error("has an invalid intrinsic name: `%s`", name.c_str());
+        error(td->loc, "%s `%s` has an invalid intrinsic name: `%s`",
+              td->kind(), td->toPrettyChars(), name.c_str());
       }
       fatal(); // or LLVM asserts
     }
@@ -1371,8 +1358,9 @@ void callPostblit(const Loc &loc, Expression *exp, LLValue *val) {
     if (sd->postblit) {
       FuncDeclaration *fd = sd->postblit;
       if (fd->storage_class & STCdisable) {
-        fd->toParent()->error(
-            loc, "is not copyable because it is annotated with `@disable`");
+        error(loc,
+              "%s `%s` is not copyable because it is annotated with `@disable`",
+              sd->kind(), sd->toPrettyChars());
       }
       Expressions args;
       DFuncValue dfn(fd, DtoCallee(fd), val);
@@ -1624,14 +1612,6 @@ DValue *DtoSymbolAddress(const Loc &loc, Type *type, Declaration *decl) {
 }
 
 llvm::Constant *DtoConstSymbolAddress(const Loc &loc, Declaration *decl) {
-  // Make sure 'this' isn't needed.
-  // TODO: This check really does not belong here, should be moved to
-  // semantic analysis in the frontend.
-  if (decl->needThis()) {
-    error(loc, "need `this` to access `%s`", decl->toChars());
-    fatal();
-  }
-
   // global variable
   if (VarDeclaration *vd = decl->isVarDeclaration()) {
     if (!vd->isDataseg()) {

@@ -195,7 +195,11 @@ static std::vector<std::string> getDefaultLibNames() {
 llvm::Optional<std::vector<std::string>> getExplicitPlatformLibs() {
   if (platformLib.getNumOccurrences() > 0)
     return parseLibNames(platformLib);
+#if LDC_LLVM_VER < 1600
   return llvm::None;
+#else
+  return std::nullopt;
+#endif
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -322,8 +326,8 @@ int runProgram() {
   assert(!gExePath.empty());
 
   // Run executable
-  int status =
-      executeToolAndWait(Loc(), gExePath, opts::runargs, global.params.verbose);
+  int status = executeToolAndWait(Loc(), gExePath, opts::runargs,
+                                  global.params.v.verbose);
   if (status < 0) {
 #if defined(_MSC_VER) || defined(__MINGW32__)
     error(Loc(), "program received signal %d", -status);

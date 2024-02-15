@@ -15,6 +15,7 @@
 #include "dmd/id.h"
 #include "dmd/identifier.h"
 #include "dmd/init.h"
+#include "dmd/ldcbindings.h"
 #include "dmd/module.h"
 #include "dmd/mtype.h"
 #include "dmd/root/port.h"
@@ -164,7 +165,7 @@ static void write_struct_literal(Loc loc, LLValue *mem, StructDeclaration *sd,
 
       IF_LOG Logger::cout() << "merged IR value: " << *val << '\n';
       gIR->ir->CreateAlignedStore(val, DtoBitCast(ptr, getPtrToType(intType)),
-                                  LLMaybeAlign(1));
+                                  llvm::MaybeAlign(1));
       offset += group.sizeInBytes;
 
       i += group.bitFields.size() - 1; // skip the other bit fields of the group
@@ -456,23 +457,20 @@ public:
 
   //////////////////////////////////////////////////////////////////////////////
 
+  void visit(LoweredAssignExp *e) override {
+    IF_LOG Logger::print("LoweredAssignExp::toElem: %s @ %s\n", e->toChars(),
+                         e->type->toChars());
+    LOG_SCOPE;
+
+    result = toElem(e->lowering);
+  }
+
   void visit(AssignExp *e) override {
     IF_LOG Logger::print("AssignExp::toElem: %s | (%s)(%s = %s)\n",
                          e->toChars(), e->type->toChars(),
                          e->e1->type->toChars(),
                          e->e2->type ? e->e2->type->toChars() : nullptr);
     LOG_SCOPE;
-
-    if (auto ale = e->e1->isArrayLengthExp()) {
-      Logger::println("performing array.length assignment");
-      DLValue arrval(ale->e1->type, DtoLVal(ale->e1));
-      DValue *newlen = toElem(e->e2);
-      DSliceValue *slice =
-          DtoResizeDynArray(e->loc, arrval.type, &arrval, DtoRVal(newlen));
-      DtoStore(DtoRVal(slice), DtoLVal(&arrval));
-      result = newlen;
-      return;
-    }
 
     // Initialization of ref variable?
     // Can't just override ConstructExp::toElem because not all EXP::construct
@@ -597,7 +595,7 @@ public:
     // valid array ops would have been transformed by optimize
     if ((t1->ty == TY::Tarray || t1->ty == TY::Tsarray) &&
         (t2->ty == TY::Tarray || t2->ty == TY::Tsarray)) {
-      base->error("Array operation `%s` not recognized", base->toChars());
+      error(base->loc, "array operation `%s` not recognized", base->toChars());
       fatal();
     }
   }
@@ -641,8 +639,8 @@ public:
     if (auto ce = e->isCommaExp()) {
       Expression *newCommaRhs = getLValExp(ce->e2);
       if (newCommaRhs != ce->e2) {
-        CommaExp *newComma = static_cast<CommaExp *>(ce->copy());
-        newComma->e2 = newCommaRhs;
+        CommaExp *newComma =
+            createCommaExp(ce->loc, ce->e1, newCommaRhs, ce->isGenerated);
         newComma->type = newCommaRhs->type;
         e = newComma;
       }
@@ -967,11 +965,13 @@ public:
     result = new DLValue(e->type, DtoBitCast(V, DtoPtrToType(e->type)));
   }
 
-  static llvm::PointerType * getWithSamePointeeType(llvm::PointerType *p, unsigned as) {
-#if LDC_LLVM_VER >= 1300
-    return llvm::PointerType::getWithSamePointeeType(p, as);
+  static llvm::PointerType * getWithSamePointeeType(llvm::PointerType *p, unsigned addressSpace) {
+#if LDC_LLVM_VER >= 1700
+    return llvm::PointerType::get(p->getContext(), addressSpace);
+#elif LDC_LLVM_VER >= 1300
+    return llvm::PointerType::getWithSamePointeeType(p, addressSpace);
 #else
-    return p->getPointerElementType()->getPointerTo(as);
+    return p->getPointerElementType()->getPointerTo(addressSpace);
 #endif
   }
 
@@ -1196,8 +1196,8 @@ public:
       p->arrays.pop_back();
 
       const bool hasLength = etype->ty != TY::Tpointer;
-      const bool needCheckUpper = hasLength && !e->upperIsInBounds;
-      const bool needCheckLower = !e->lowerIsLessThanUpper;
+      const bool needCheckUpper = hasLength && !e->upperIsInBounds();
+      const bool needCheckLower = !e->lowerIsLessThanUpper();
       if (p->emitArrayBoundsChecks() && (needCheckUpper || needCheckLower)) {
         llvm::BasicBlock *okbb = p->insertBB("bounds.ok");
         llvm::BasicBlock *failbb = p->insertBBAfter(okbb, "bounds.fail");
@@ -1533,13 +1533,9 @@ public:
         // allocate & init
         result = DtoNewDynArray(e->loc, e->newtype, sz, true);
       } else {
-        size_t ndims = e->arguments->length;
-        std::vector<DValue *> dims;
-        dims.reserve(ndims);
-        for (auto arg : *e->arguments) {
-          dims.push_back(toElem(arg));
-        }
-        result = DtoNewMulDimDynArray(e->loc, e->newtype, &dims[0], ndims);
+        assert(e->lowering);
+        LLValue *pair = DtoRVal(e->lowering);
+        result = new DSliceValue(e->type, pair);
       }
     }
     // new static array
@@ -1552,8 +1548,9 @@ public:
 
       TypeStruct *ts = static_cast<TypeStruct *>(ntype);
 
-      // allocate
-      LLValue *mem = DtoNewStruct(e->loc, ts);
+      // allocate (via _d_newitemT template lowering)
+      assert(e->lowering);
+      LLValue *mem = DtoRVal(e->lowering);
 
       if (!e->member && e->arguments) {
         IF_LOG Logger::println("Constructing using literal");
@@ -1921,9 +1918,10 @@ public:
     LOG_SCOPE;
 
     if (e->func->isStatic()) {
-      e->error("can't take delegate of static function `%s`, it does not "
-               "require a context ptr",
-               e->func->toChars());
+      error(e->loc,
+            "can't take delegate of static function `%s`, it does not "
+            "require a context ptr",
+            e->func->toChars());
     }
 
     LLPointerType *int8ptrty = getPtrToType(LLType::getInt8Ty(gIR->context()));
@@ -2161,7 +2159,7 @@ public:
                          e->type->toChars());
     LOG_SCOPE;
 
-    if (global.params.betterC) {
+    if (!global.params.useGC) {
       error(
           e->loc,
           "array concatenation of expression `%s` requires the GC which is not "
@@ -2172,7 +2170,12 @@ public:
       return;
     }
 
-    result = DtoCatArrays(e->loc, e->type, e->e1, e->e2);
+    if (e->lowering) {
+      result = toElem(e->lowering);
+      return;
+    }
+
+    llvm_unreachable("CatExp should have been lowered");
   }
 
   //////////////////////////////////////////////////////////////////////////////
@@ -2181,6 +2184,22 @@ public:
     IF_LOG Logger::print("CatAssignExp::toElem: %s @ %s\n", e->toChars(),
                          e->type->toChars());
     LOG_SCOPE;
+
+    if (!global.params.useGC) {
+      error(e->loc,
+            "appending to array in `%s` requires the GC which is not available "
+            "with -betterC",
+            e->toChars());
+      result =
+          new DSliceValue(e->type, llvm::UndefValue::get(DtoType(e->type)));
+      return;
+    }
+
+    if (e->lowering) {
+      assert(e->op != EXP::concatenateDcharAssign);
+      result = toElem(e->lowering);
+      return;
+    }
 
     result = toElem(e->e1);
 
@@ -2191,6 +2210,7 @@ public:
 
     if (e1type->ty == TY::Tarray && e2type->ty == TY::Tdchar &&
         (elemtype->ty == TY::Tchar || elemtype->ty == TY::Twchar)) {
+      assert(e->op == EXP::concatenateDcharAssign);
       if (elemtype->ty == TY::Tchar) {
         // append dchar to char[]
         DtoAppendDCharToString(e->loc, result, e->e2);
@@ -2199,7 +2219,7 @@ public:
         DtoAppendDCharToUnicodeString(e->loc, result, e->e2);
       }
     } else {
-      e->error("ICE: array append should have been lowered to `_d_arrayappend{T,cTX}`!");
+      error(e->loc, "ICE: array append should have been lowered to `_d_arrayappend{T,cTX}`!");
       fatal();
     }
   }
@@ -2597,7 +2617,7 @@ public:
   //////////////////////////////////////////////////////////////////////////////
 
   void visit(TypeExp *e) override {
-    e->error("type `%s` is not an expression", e->toChars());
+    error(e->loc, "type `%s` is not an expression", e->toChars());
     // TODO: Improve error handling. DMD just returns some value here and hopes
     // some more sensible error messages will be triggered.
     fatal();
@@ -2720,10 +2740,8 @@ public:
       if (auto llConstant = isaConstant(llElement)) {
 #if LDC_LLVM_VER >= 1200
         const auto elementCount = llvm::ElementCount::getFixed(N);
-#elif LDC_LLVM_VER >= 1100
-        const auto elementCount = llvm::ElementCount(N, false);
 #else
-        const auto elementCount = N;
+        const auto elementCount = llvm::ElementCount(N, false);
 #endif
         auto vectorConstant =
             llvm::ConstantVector::getSplat(elementCount, llConstant);
@@ -2760,7 +2778,7 @@ public:
     IF_LOG Logger::print("PowExp::toElem() %s\n", e->toChars());
     LOG_SCOPE;
 
-    e->error("must import `std.math` to use `^^` operator");
+    error(e->loc, "must import `std.math` to use `^^` operator");
     result = new DNullValue(e->type, llvm::UndefValue::get(DtoType(e->type)));
   }
 
@@ -2810,8 +2828,9 @@ public:
 
 #define STUB(x)                                                                \
   void visit(x *e) override {                                                  \
-    e->error("Internal compiler error: Type `" #x "` not implemented: `%s`",   \
-             e->toChars());                                                    \
+    error(e->loc,                                                              \
+          "Internal compiler error: Type `" #x "` not implemented: `%s`",      \
+          e->toChars());                                                       \
     fatal();                                                                   \
   }
   STUB(Expression)

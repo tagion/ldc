@@ -12,7 +12,7 @@ concurrency:
 
 env:
   CLANG_VERSION: 15.0.6
-  LLVM_VERSION: 15.0.7
+  LLVM_VERSION: 17.0.6
 
 jobs:
   build-native:
@@ -43,9 +43,12 @@ jobs:
             bootstrap_cmake_flags: >-
               -DBUILD_LTO_LIBS=ON
               -DD_COMPILER_FLAGS=-gcc=/usr/bin/c++
+            # https://github.com/ldc-developers/ldc/issues/4462:
+            # When using LTO, we need to explicitly export ~all symbols for plugin support via `ld64 -exported_symbol '__*'`.
+            # Additionally `-w` to suppress resulting linker warnings.
             extra_cmake_flags: >-
               -DBUILD_LTO_LIBS=ON
-              -DD_COMPILER_FLAGS="-gcc=/usr/bin/c++ -O -flto=full -defaultlib=phobos2-ldc-lto,druntime-ldc-lto"
+              -DD_COMPILER_FLAGS="-gcc=/usr/bin/c++ -O -flto=full -defaultlib=phobos2-ldc-lto,druntime-ldc-lto -L-exported_symbol '-L__*' -L-w"
               -DEXTRA_CXXFLAGS=-flto=full
             with_pgo: true
 
@@ -83,7 +86,7 @@ jobs:
       - name: Install prerequisites
         uses: ./.github/actions/1-setup
         with:
-          clang_version: ${{ env.CLANG_VERSION }}
+          clang_version: ${{ runner.os == 'Windows' && '16.0.6' || env.CLANG_VERSION }}
           llvm_version: ${{ env.LLVM_VERSION }}
           arch: ${{ matrix.arch }}
       - name: Build bootstrap LDC
@@ -163,9 +166,10 @@ jobs:
             os: osx
             arch: arm64
             bootstrap_cmake_flags: -DD_COMPILER_FLAGS=-gcc=/usr/bin/c++
+            # see native macOS job comment for extra flags (https://github.com/ldc-developers/ldc/issues/4462)
             extra_cmake_flags: >-
               -DBUILD_LTO_LIBS=ON
-              -DD_COMPILER_FLAGS="-O -flto=full -defaultlib=phobos2-ldc-lto,druntime-ldc-lto"
+              -DD_COMPILER_FLAGS="-O -flto=full -defaultlib=phobos2-ldc-lto,druntime-ldc-lto -L-exported_symbol '-L__*' -L-w"
               -DEXTRA_CXXFLAGS=-flto=full
             with_pgo: true
 
@@ -202,7 +206,7 @@ jobs:
     env:
       MACOSX_DEPLOYMENT_TARGET: 11.0
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           submodules: true
           fetch-depth: 50
@@ -261,7 +265,7 @@ jobs:
       - build-native
       - build-cross
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Merge x86_64 & arm64 packages to universal one
         uses: ./.github/actions/merge-macos
 
@@ -271,7 +275,7 @@ jobs:
     timeout-minutes: 30
     needs: build-native
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Merge x64 & x86 packages to multilib one & build installer
         uses: ./.github/actions/merge-windows
 

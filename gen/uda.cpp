@@ -17,15 +17,6 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSwitch.h"
 
-#if LDC_LLVM_VER < 1100
-namespace llvm {
-// Auto-generate:
-// Attribute::AttrKind getAttrKindFromName(StringRef AttrName) { ... }
-#define GET_ATTR_KIND_FROM_NAME
-#include "llvm/IR/Attributes.inc"
-}
-#endif
-
 namespace {
 
 /// Checks whether `moduleDecl` is in the ldc package and it's identifier is
@@ -57,7 +48,7 @@ StructLiteralExp *getLdcAttributesStruct(Expression *attr) {
   // attributes are struct literals that may be constructed using a CTFE
   // function.
   unsigned prevErrors = global.startGagging();
-  auto e = attr->ctfeInterpret();
+  auto e = ctfeInterpret(attr);
   if (global.endGagging(prevErrors)) {
     return nullptr;
   }
@@ -72,19 +63,19 @@ StructLiteralExp *getLdcAttributesStruct(Expression *attr) {
 
 void checkStructElems(StructLiteralExp *sle, ArrayParam<Type *> elemTypes) {
   if (sle->elements->length != elemTypes.size()) {
-    sle->error("unexpected field count in `ldc.%s.%s`; does druntime not "
-               "match compiler version?",
-               sle->sd->getModule()->md->id->toChars(),
-               sle->sd->ident->toChars());
+    error(sle->loc,
+          "unexpected field count in `%s`; does druntime not match compiler "
+          "version?",
+          sle->sd->toPrettyChars());
     fatal();
   }
 
   for (size_t i = 0; i < sle->elements->length; ++i) {
     if ((*sle->elements)[i]->type->toBasetype() != elemTypes[i]) {
-      sle->error("invalid field type in `ldc.%s.%s`; does druntime not "
-                 "match compiler version?",
-                 sle->sd->getModule()->md->id->toChars(),
-                 sle->sd->ident->toChars());
+      error(sle->loc,
+            "invalid field type in `%s`; does druntime not match compiler "
+            "version?",
+            sle->sd->toPrettyChars());
       fatal();
     }
   }
@@ -182,20 +173,22 @@ void applyAttrAllocSize(StructLiteralExp *sle, IrFunction *irFunc) {
   auto numUserParams = irFunc->irFty.args.size();
 
   // Verify that the index values are valid
-  bool error = false;
+  bool hasErrors = false;
   if (sizeArgIdx + 1 > sinteger_t(numUserParams)) {
-    sle->error("`@ldc.attributes.allocSize.sizeArgIdx=%d` too large for "
-               "function `%s` with %d arguments.",
-               (int)sizeArgIdx, irFunc->decl->toChars(), (int)numUserParams);
-    error = true;
+    error(sle->loc,
+          "`@ldc.attributes.allocSize.sizeArgIdx=%d` too large for "
+          "function `%s` with %d arguments.",
+          (int)sizeArgIdx, irFunc->decl->toChars(), (int)numUserParams);
+    hasErrors = true;
   }
   if (numArgIdx + 1 > sinteger_t(numUserParams)) {
-    sle->error("`@ldc.attributes.allocSize.numArgIdx=%d` too large for "
-               "function `%s` with %d arguments.",
-               (int)numArgIdx, irFunc->decl->toChars(), (int)numUserParams);
-    error = true;
+    error(sle->loc,
+          "`@ldc.attributes.allocSize.numArgIdx=%d` too large for "
+          "function `%s` with %d arguments.",
+          (int)numArgIdx, irFunc->decl->toChars(), (int)numUserParams);
+    hasErrors = true;
   }
-  if (error)
+  if (hasErrors)
     return;
 
   // Get the number of parameters of the function in LLVM IR. This includes
@@ -219,7 +212,11 @@ void applyAttrAllocSize(StructLiteralExp *sle, IrFunction *irFunc) {
   if (numArgIdx >= 0) {
     builder.addAllocSizeAttr(llvmSizeIdx, llvmNumIdx);
   } else {
+#if LDC_LLVM_VER < 1600
     builder.addAllocSizeAttr(llvmSizeIdx, llvm::Optional<unsigned>());
+#else
+    builder.addAllocSizeAttr(llvmSizeIdx, std::optional<unsigned>());
+#endif
   }
 
   llvm::Function *func = irFunc->getLLVMFunc();
@@ -238,11 +235,7 @@ void applyAttrLLVMAttr(StructLiteralExp *sle, llvm::AttrBuilder &attrs) {
   llvm::StringRef key = getStringElem(sle, 0);
   llvm::StringRef value = getStringElem(sle, 1);
   if (value.empty()) {
-#if LDC_LLVM_VER >= 1100
     const auto kind = llvm::Attribute::getAttrKindFromName(key);
-#else
-    const auto kind = llvm::getAttrKindFromName(key);
-#endif
     if (kind != llvm::Attribute::None) {
       attrs.addAttribute(kind);
     } else {
@@ -273,7 +266,7 @@ void applyAttrLLVMFastMathFlag(StructLiteralExp *sle, IrFunction *irFunc) {
   } else if (value == "arcp") {
     irFunc->FMF.setAllowReciprocal();
   } else {
-    sle->warning(
+    warning(sle->loc,
         "ignoring unrecognized flag parameter `%.*s` for `@ldc.attributes.%s`",
         static_cast<int>(value.size()), value.data(),
         sle->sd->ident->toChars());
@@ -287,9 +280,10 @@ void applyAttrOptStrategy(StructLiteralExp *sle, IrFunction *irFunc) {
   llvm::Function *func = irFunc->getLLVMFunc();
   if (value == "none") {
     if (irFunc->decl->inlining == PINLINE::always) {
-      sle->error("cannot combine `@ldc.attributes.%s(\"none\")` with "
-                 "`pragma(inline, true)`",
-                 sle->sd->ident->toChars());
+      error(sle->loc,
+            "cannot combine `@ldc.attributes.%s(\"none\")` with "
+            "`pragma(inline, true)`",
+            sle->sd->ident->toChars());
       return;
     }
     irFunc->decl->inlining = PINLINE::never;
@@ -299,7 +293,7 @@ void applyAttrOptStrategy(StructLiteralExp *sle, IrFunction *irFunc) {
   } else if (value == "minsize") {
     func->addFnAttr(llvm::Attribute::MinSize);
   } else {
-    sle->warning(
+    warning(sle->loc,
         "ignoring unrecognized parameter `%.*s` for `@ldc.attributes.%s`",
         static_cast<int>(value.size()), value.data(),
         sle->sd->ident->toChars());
@@ -423,9 +417,7 @@ bool parseCallingConvention(llvm::StringRef name,
           .Case("ccc", llvm::CallingConv::C)
           .Case("fastcc", llvm::CallingConv::Fast)
           .Case("coldcc", llvm::CallingConv::Cold)
-#if LDC_LLVM_VER >= 1000
           .Case("cfguard_checkcc", llvm::CallingConv::CFGuard_Check)
-#endif
           .Case("x86_stdcallcc", llvm::CallingConv::X86_StdCall)
           .Case("x86_fastcallcc", llvm::CallingConv::X86_FastCall)
           .Case("x86_regcallcc", llvm::CallingConv::X86_RegCall)
@@ -435,10 +427,8 @@ bool parseCallingConvention(llvm::StringRef name,
           .Case("arm_aapcscc", llvm::CallingConv::ARM_AAPCS)
           .Case("arm_aapcs_vfpcc", llvm::CallingConv::ARM_AAPCS_VFP)
           .Case("aarch64_vector_pcs", llvm::CallingConv::AArch64_VectorCall)
-#if LDC_LLVM_VER >= 1000
           .Case("aarch64_sve_vector_pcs",
                 llvm::CallingConv::AArch64_SVE_VectorCall)
-#endif
           .Case("msp430_intrcc", llvm::CallingConv::MSP430_INTR)
           .Case("avr_intrcc", llvm::CallingConv::AVR_INTR)
           .Case("avr_signalcc", llvm::CallingConv::AVR_SIGNAL)
@@ -459,8 +449,13 @@ bool parseCallingConvention(llvm::StringRef name,
           .Case("swifttailcc", llvm::CallingConv::SwiftTail)
 #endif
           .Case("x86_intrcc", llvm::CallingConv::X86_INTR)
+#if LDC_LLVM_VER >= 1700
+          .Case("hhvmcc", llvm::CallingConv::DUMMY_HHVM)
+          .Case("hhvm_ccc", llvm::CallingConv::DUMMY_HHVM_C)
+#else
           .Case("hhvmcc", llvm::CallingConv::HHVM)
           .Case("hhvm_ccc", llvm::CallingConv::HHVM_C)
+#endif
           .Case("cxx_fast_tlscc", llvm::CallingConv::CXX_FAST_TLS)
           .Case("amdgpu_vs", llvm::CallingConv::AMDGPU_VS)
 #if LDC_LLVM_VER >= 1200
@@ -473,9 +468,7 @@ bool parseCallingConvention(llvm::StringRef name,
           .Case("amdgpu_ps", llvm::CallingConv::AMDGPU_PS)
           .Case("amdgpu_cs", llvm::CallingConv::AMDGPU_CS)
           .Case("amdgpu_kernel", llvm::CallingConv::AMDGPU_KERNEL)
-#if LDC_LLVM_VER >= 1000
           .Case("tailcc", llvm::CallingConv::Tail)
-#endif
 
           .Case("default", llvm::CallingConv::MaxID - 1)
           .Default(llvm::CallingConv::MaxID);
@@ -506,9 +499,9 @@ void applyVarDeclUDAs(VarDeclaration *decl, llvm::GlobalVariable *gvar) {
       if (!decl->isExport()) // export visibility is stronger
         gvar->setVisibility(LLGlobalValue::HiddenVisibility);
     } else if (ident == Id::udaOptStrategy || ident == Id::udaTarget) {
-      sle->error(
-          "Special attribute `ldc.attributes.%s` is only valid for functions",
-          ident->toChars());
+      error(sle->loc,
+            "special attribute `ldc.attributes.%s` is only valid for functions",
+            ident->toChars());
     } else if (ident == Id::udaAssumeUsed) {
       applyAttrAssumeUsed(*gIR, sle, gvar);
     } else if (ident == Id::udaWeak) {
@@ -516,14 +509,14 @@ void applyVarDeclUDAs(VarDeclaration *decl, llvm::GlobalVariable *gvar) {
     } else if (ident == Id::udaDynamicCompile ||
                ident == Id::udaDynamicCompileEmit ||
                ident == Id::udaCallingConvention) {
-      sle->error(
-          "Special attribute `ldc.attributes.%s` is only valid for functions",
-          ident->toChars());
+      error(sle->loc,
+            "special attribute `ldc.attributes.%s` is only valid for functions",
+            ident->toChars());
     } else if (ident == Id::udaDynamicCompileConst) {
       getIrGlobal(decl)->dynamicCompileConst = true;
     } else {
-      sle->warning(
-          "Ignoring unrecognized special attribute `ldc.attributes.%s`",
+      warning(sle->loc,
+          "ignoring unrecognized special attribute `ldc.attributes.%s`",
           ident->toChars());
     }
   }
@@ -580,12 +573,13 @@ void applyFuncDeclUDAs(FuncDeclaration *decl, IrFunction *irFunc) {
       } else if (ident == Id::udaDynamicCompileEmit) {
         irFunc->dynamicCompileEmit = true;
       } else if (ident == Id::udaDynamicCompileConst) {
-        sle->error(
-            "Special attribute `ldc.attributes.%s` is only valid for variables",
+        error(
+            sle->loc,
+            "special attribute `ldc.attributes.%s` is only valid for variables",
             ident->toChars());
       } else {
-        sle->warning(
-            "Ignoring unrecognized special attribute `ldc.attributes.%s`",
+        warning(sle->loc,
+            "ignoring unrecognized special attribute `ldc.attributes.%s`",
             ident->toChars());
       }
     }
@@ -613,9 +607,10 @@ void applyFuncDeclUDAs(FuncDeclaration *decl, IrFunction *irFunc) {
       if (ident == Id::udaLLVMAttr) {
         applyAttrLLVMAttr(sle, arg->attrs);
       } else {
-        sle->warning("Ignoring unrecognized special parameter attribute "
-                     "`ldc.attributes.%s`",
-                     ident->toChars());
+        warning(sle->loc,
+                "ignoring unrecognized special parameter attribute "
+                "`ldc.attributes.%s`",
+                ident->toChars());
       }
     }
   }
@@ -634,7 +629,7 @@ bool hasCallingConventionUDA(FuncDeclaration *fd,
   auto name = getFirstElemString(sle);
   bool success = parseCallingConvention(name, callconv);
   if (!success)
-    sle->warning("Ignoring unrecognized calling convention name '%s' for "
+    warning(sle->loc, "ignoring unrecognized calling convention name '%s' for "
                  "`@ldc.attributes.callingConvention`",
                  name.str().c_str());
   return success;
@@ -649,8 +644,9 @@ bool hasWeakUDA(Dsymbol *sym) {
   checkStructElems(sle, {});
   auto vd = sym->isVarDeclaration();
   if (!(vd && vd->isDataseg()) && !sym->isFuncDeclaration())
-    sym->error("`@ldc.attributes.weak` can only be applied to functions or "
-               "global variables");
+    error(sym->loc,
+          "`@ldc.attributes.weak` can only be applied to functions or "
+          "global variables");
   return true;
 }
 
@@ -677,8 +673,8 @@ bool hasKernelAttr(Dsymbol *sym) {
 
   if (!sym->isFuncDeclaration() &&
       hasComputeAttr(sym->getModule()) != DComputeCompileFor::hostOnly) {
-    sym->error("`@ldc.dcompute.kernel` can only be applied to functions"
-               " in modules marked `@ldc.dcompute.compute`");
+    error(sym->loc, "`@ldc.dcompute.kernel` can only be applied to functions"
+                    " in modules marked `@ldc.dcompute.compute`");
   }
 
   return true;
@@ -703,8 +699,8 @@ unsigned getMaskFromNoSanitizeUDA(FuncDeclaration &fd) {
     checkStructElems(sle, {Type::tstring});
     auto name = getFirstElemString(sle);
     inverse_mask |= opts::parseSanitizerName(name, [&] {
-      sle->warning(
-          "Unrecognized sanitizer name '%s' for `@ldc.attributes.noSanitize`.",
+      warning(sle->loc,
+          "unrecognized sanitizer name '%s' for `@ldc.attributes.noSanitize`.",
           name.str().c_str());
     });
   });

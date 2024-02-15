@@ -3,7 +3,7 @@
  *
  * Specification: $(LINK2 https://dlang.org/spec/lex.html, Lexical)
  *
- * Copyright:   Copyright (C) 1999-2023 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2024 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 https://www.digitalmars.com, Walter Bright)
  * License:     $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
  * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/lexer.d, _lexer.d)
@@ -14,12 +14,8 @@
 module dmd.lexer;
 
 import core.stdc.ctype;
-import core.stdc.errno;
-import core.stdc.stdarg;
 import core.stdc.stdio;
-import core.stdc.stdlib : getenv;
 import core.stdc.string;
-import core.stdc.time;
 
 import dmd.entity;
 import dmd.errorsink;
@@ -31,16 +27,30 @@ import dmd.root.ctfloat;
 import dmd.common.outbuffer;
 import dmd.root.port;
 import dmd.root.rmem;
-import dmd.root.string;
 import dmd.root.utf;
 import dmd.tokens;
-import dmd.utils;
 
 nothrow:
 
 version (DMDLIB)
 {
     version = LocOffset;
+}
+
+/***********************************************************
+ * Values to use for various magic identifiers
+ */
+struct CompileEnv
+{
+    uint versionNumber;      /// __VERSION__
+    const(char)[] date;      /// __DATE__
+    const(char)[] time;      /// __TIME__
+    const(char)[] vendor;    /// __VENDOR__
+    const(char)[] timestamp; /// __TIMESTAMP__
+
+    bool previewIn;          /// `in` means `[ref] scope const`, accepts rvalues
+    bool ddocOutput;         /// collect embedded documentation comments
+    bool masm;               /// use MASM inline asm syntax
 }
 
 /***********************************************************
@@ -69,6 +79,7 @@ class Lexer
     ubyte wchar_tsize;          /// size of C wchar_t, 2 or 4
 
     ErrorSink eSink;            /// send error messages through this interface
+    CompileEnv compileEnv;      /// environment
 
     private
     {
@@ -87,8 +98,6 @@ class Lexer
         int lastDocLine;        // last line of previous doc comment
 
         Token* tokenFreelist;
-        uint versionNumber;
-        const(char)[] vendor;
     }
 
   nothrow:
@@ -105,13 +114,12 @@ class Lexer
      *  doDocComment = handle documentation comments
      *  commentToken = comments become TOK.comment's
      *  errorSink = where error messages go, must not be null
-     *  vendor = name of the vendor
-     *  versionNumber = version of the caller
+     *  compileEnv = version, vendor, date, time, etc.
      */
     this(const(char)* filename, const(char)* base, size_t begoffset,
         size_t endoffset, bool doDocComment, bool commentToken,
         ErrorSink errorSink,
-        const(char)[] vendor = "DLF", uint versionNumber = 1) pure scope
+        const CompileEnv* compileEnv) scope
     {
         scanloc = Loc(filename, 1, 1);
         // debug printf("Lexer::Lexer(%p)\n", base);
@@ -128,8 +136,13 @@ class Lexer
         this.lastDocLine = 0;
         this.eSink = errorSink;
         assert(errorSink);
-        this.versionNumber = versionNumber;
-        this.vendor = vendor;
+        if (compileEnv)
+            this.compileEnv = *compileEnv;
+        else
+        {
+            this.compileEnv.versionNumber = 1;
+            this.compileEnv.vendor = "DLF";
+        }
         //initKeywords();
         /* If first line starts with '#!', ignore the line
          */
@@ -169,17 +182,17 @@ class Lexer
      */
     this(const(char)* filename, const(char)* base, size_t begoffset, size_t endoffset,
         bool doDocComment, bool commentToken, bool whitespaceToken,
-        ErrorSink errorSink
+        ErrorSink errorSink, const CompileEnv* compileEnv = null
         )
     {
-        this(filename, base, begoffset, endoffset, doDocComment, commentToken, errorSink);
+        this(filename, base, begoffset, endoffset, doDocComment, commentToken, errorSink, compileEnv);
         this.whitespaceToken = whitespaceToken;
     }
 
     /******************
      * Used for unittests for a mock Lexer
      */
-    this(ErrorSink errorSink) scope { assert(errorSink); this.eSink = errorSink; }
+    this(ErrorSink errorSink) scope @safe { assert(errorSink); this.eSink = errorSink; }
 
     /**************************************
      * Reset lexer to lex #define's
@@ -380,6 +393,15 @@ class Lexer
                     }
                 }
                 continue; // skip white space
+
+            case '\\':
+                if (Ccompile && (p[1] == '\r' || p[1] == '\n'))
+                {
+                    ++p; // ignore \ followed by new line, like VC does
+                    continue;
+                }
+                goto default;
+
             case '0':
                 if (!isZeroSecond(p[1]))        // if numeric literal does not continue
                 {
@@ -461,6 +483,12 @@ class Lexer
                     goto default;
                 wysiwygStringConstant(t);
                 return;
+            case 'x':
+                if (p[1] != '"')
+                    goto case_ident;
+                p++;
+                t.value = hexStringConstant(t);
+                return;
             case 'q':
                 if (Ccompile)
                     goto case_ident;
@@ -503,7 +531,7 @@ class Lexer
             //case 'u':
             case 'v':
             case 'w':
-            case 'x':
+                /*case 'x':*/
             case 'y':
             case 'z':
             case 'A':
@@ -551,7 +579,7 @@ class Lexer
                         }
                         break;
                     }
-                    Identifier id = Identifier.idPool(cast(char*)t.ptr, cast(uint)(p - t.ptr));
+                    Identifier id = Identifier.idPool((cast(char*)t.ptr)[0 .. p - t.ptr], false);
                     t.ident = id;
                     t.value = cast(TOK)id.getValue();
 
@@ -571,36 +599,26 @@ class Lexer
 
                     else if (*t.ptr == '_') // if special identifier token
                     {
-                        // Lazy initialization
-                        TimeStampInfo.initialize(t.loc, eSink);
+                        void toToken(const(char)[] s)
+                        {
+                            t.value = TOK.string_;
+                            t.ustring = s.ptr;
+                            t.len = cast(uint)s.length;
+                            t.postfix = 0;
+                        }
 
                         if (id == Id.DATE)
-                        {
-                            t.ustring = TimeStampInfo.date.ptr;
-                            goto Lstr;
-                        }
+                            toToken(compileEnv.date);
                         else if (id == Id.TIME)
-                        {
-                            t.ustring = TimeStampInfo.time.ptr;
-                            goto Lstr;
-                        }
+                            toToken(compileEnv.time);
                         else if (id == Id.VENDOR)
-                        {
-                            t.ustring = vendor.xarraydup.ptr;
-                            goto Lstr;
-                        }
+                            toToken(compileEnv.vendor);
                         else if (id == Id.TIMESTAMP)
-                        {
-                            t.ustring = TimeStampInfo.timestamp.ptr;
-                        Lstr:
-                            t.value = TOK.string_;
-                            t.postfix = 0;
-                            t.len = cast(uint)strlen(t.ustring);
-                        }
+                            toToken(compileEnv.timestamp);
                         else if (id == Id.VERSIONX)
                         {
                             t.value = TOK.int64Literal;
-                            t.unsvalue = versionNumber;
+                            t.unsvalue = compileEnv.versionNumber;
                         }
                         else if (id == Id.EOFX)
                         {
@@ -1463,6 +1481,85 @@ class Lexer
         }
     }
 
+    /**************************************
+     * Lex hex strings:
+     *      x"0A ae 34FE BD"
+     */
+    final TOK hexStringConstant(Token* t)
+    {
+        Loc start = loc();
+        uint n = 0;
+        uint v = ~0; // dead assignment, needed to suppress warning
+        p++;
+        stringbuffer.setsize(0);
+        while (1)
+        {
+            dchar c = *p++;
+            switch (c)
+            {
+            case ' ':
+            case '\t':
+            case '\v':
+            case '\f':
+                continue; // skip white space
+            case '\r':
+                if (*p == '\n')
+                    continue; // ignore '\r' if followed by '\n'
+                // Treat isolated '\r' as if it were a '\n'
+                goto case '\n';
+            case '\n':
+                endOfLine();
+                continue;
+            case 0:
+            case 0x1A:
+                error("unterminated string constant starting at %s", start.toChars());
+                t.setString();
+                // decrement `p`, because it needs to point to the next token (the 0 or 0x1A character is the TOK.endOfFile token).
+                p--;
+                return TOK.hexadecimalString;
+            case '"':
+                if (n & 1)
+                {
+                    error("odd number (%d) of hex characters in hex string", n);
+                    stringbuffer.writeByte(v);
+                }
+                t.setString(stringbuffer);
+                t.postfix = 'h';
+                stringPostfix(t);
+                return TOK.hexadecimalString;
+            default:
+                if (c >= '0' && c <= '9')
+                    c -= '0';
+                else if (c >= 'a' && c <= 'f')
+                    c -= 'a' - 10;
+                else if (c >= 'A' && c <= 'F')
+                    c -= 'A' - 10;
+                else if (c & 0x80)
+                {
+                    p--;
+                    const u = decodeUTF();
+                    p++;
+                    if (u == PS || u == LS)
+                        endOfLine();
+                    else
+                        error("non-hex character \\u%04x in hex string", u);
+                }
+                else
+                    error("non-hex character '%c' in hex string", c);
+                if (n & 1)
+                {
+                    v = (v << 4) | c;
+                    stringbuffer.writeByte(v);
+                }
+                else
+                    v = c;
+                n++;
+                break;
+            }
+        }
+        assert(0); // see bug 15731
+    }
+
     /**
     Lex a delimited string. Some examples of delimited strings are:
     ---
@@ -1911,23 +2008,17 @@ class Lexer
             case 'u':
                 dchar d1;
                 size_t idx;
-                auto msg = utf_decodeChar(str, idx, d1);
-                dchar d2 = 0;
-                if (idx < n && !msg)
-                    msg = utf_decodeChar(str, idx, d2);
-                if (msg)
-                    error(loc, "%.*s", cast(int)msg.length, msg.ptr);
-                else if (idx < n)
-                    error(loc, "max number of chars in 16 bit character literal is 2, had %d",
-                        cast(int)((n + 1) >> 1));
-                else if (d1 > 0x1_0000)
-                    error(loc, "%d does not fit in 16 bits", d1);
-                else if (d2 > 0x1_0000)
-                    error(loc, "%d does not fit in 16 bits", d2);
-                u = d1;
-                if (d2)
-                    u = (d1 << 16) | d2;
-                break;
+                while (idx < n)
+                {
+                    string msg = utf_decodeChar(str, idx, d1);
+                    if (msg)
+                        error(loc, "%.*s", cast(int)msg.length, msg.ptr);
+                }
+                if (d1 >= 0x1_0000)
+                    error(loc, "x%x does not fit in 16 bits", d1);
+                t.unsvalue = d1;
+                t.value = TOK.wcharLiteral; // C11 6.4.4.4-9
+                return;
 
             case 'U':
                 dchar d;
@@ -1938,8 +2029,9 @@ class Lexer
                 else if (idx < n)
                     error(loc, "max number of chars in 32 bit character literal is 1, had %d",
                         cast(int)((n + 3) >> 2));
-                u = d;
-                break;
+                t.unsvalue = d;
+                t.value = TOK.dcharLiteral; // C11 6.4.4.4-9
+                return;
 
             default:
                 assert(0);
@@ -2109,9 +2201,14 @@ class Lexer
                 if (base == 2)
                     goto Ldone; // if ".identifier" or ".unicode"
                 goto Lreal; // otherwise as part of a floating point literal
+
+            case 'i':
+                if (Ccompile)
+                    goto Ldone;
+                goto Lreal;
+
             case 'p':
             case 'P':
-            case 'i':
             Lreal:
                 p = start;
                 return inreal(t);
@@ -2193,7 +2290,7 @@ class Lexer
                 p++;
                 if ((flags & f) && !err)
                 {
-                    error("unrecognized token");
+                    error("repeated integer suffix `%c`", p[-1]);
                     err = true;
                 }
                 flags = cast(FLAGS)(flags | f);
@@ -2304,7 +2401,13 @@ class Lexer
             decimal  = 2, // decimal
             unsigned = 4, // u or U suffix
             long_    = 8, // l or L suffix
-            llong    = 0x10 // ll or LL
+            llong    = 0x10, // ll or LL
+
+            // Microsoft extensions
+            i8       = 0x20,
+            i16      = 0x40,
+            i32      = 0x80,
+            i64      = 0x100,
         }
         FLAGS flags = (base == 10) ? FLAGS.decimal : FLAGS.octalhex;
         bool err;
@@ -2327,6 +2430,37 @@ class Lexer
                     {
                         f = FLAGS.long_ | FLAGS.llong;
                         ++p;
+                    }
+                    break;
+
+                case 'i':
+                case 'I':
+                    if (p[1] == '8')
+                    {
+                        f = FLAGS.i8;
+                        ++p;
+                    }
+                    else if (p[1] == '1' && p[2] == '6')
+                    {
+                        f = FLAGS.i16;
+                        p += 2;
+                    }
+                    else if (p[1] == '3' && p[2] == '2')
+                    {
+                        f = FLAGS.i32;
+                        p += 2;
+                    }
+                    else if (p[1] == '6' && p[2] == '4')
+                    {
+                        f = FLAGS.i64;
+                        p += 2;
+                    }
+                    else
+                        break Lsuffixes;
+                    if (p[1] >= '0' && p[1] <= '9' && !err)
+                    {
+                        error("invalid integer suffix");
+                        err = true;
                     }
                     break;
 
@@ -2462,6 +2596,34 @@ class Lexer
                 result = TOK.uns64Literal;
                 break;
 
+            case FLAGS.octalhex | FLAGS.i8:
+            case FLAGS.octalhex | FLAGS.i16:
+            case FLAGS.octalhex | FLAGS.i32:
+            case FLAGS.octalhex | FLAGS.unsigned | FLAGS.i8:
+            case FLAGS.octalhex | FLAGS.unsigned | FLAGS.i16:
+            case FLAGS.octalhex | FLAGS.unsigned | FLAGS.i32:
+            case FLAGS.decimal  | FLAGS.unsigned | FLAGS.i8:
+            case FLAGS.decimal  | FLAGS.unsigned | FLAGS.i16:
+            case FLAGS.decimal  | FLAGS.unsigned | FLAGS.i32:
+                result = TOK.uns32Literal;
+                break;
+
+            case FLAGS.decimal | FLAGS.i8:
+            case FLAGS.decimal | FLAGS.i16:
+            case FLAGS.decimal | FLAGS.i32:
+                result = TOK.int32Literal;
+                break;
+
+            case FLAGS.octalhex | FLAGS.i64:
+            case FLAGS.octalhex | FLAGS.unsigned | FLAGS.i64:
+            case FLAGS.decimal  | FLAGS.unsigned | FLAGS.i64:
+                result = TOK.uns64Literal;
+                break;
+
+            case FLAGS.decimal | FLAGS.i64:
+                result = TOK.int64Literal;
+                break;
+
             default:
                 debug printf("%x\n",flags);
                 assert(0);
@@ -2570,6 +2732,14 @@ class Lexer
         TOK result;
         bool isOutOfRange = false;
         t.floatvalue = (isWellformedString ? CTFloat.parse(sbufptr, isOutOfRange) : CTFloat.zero);
+
+        bool imaginary = false;
+        if (*p == 'i' && Ccompile)
+        {
+            ++p;
+            imaginary = true;
+        }
+
         switch (*p)
         {
         case 'F':
@@ -2590,16 +2760,25 @@ class Lexer
             goto case 'L';
         case 'L':
             ++p;
+version (IN_LLVM) { /* *always* map C `long double` literals to D `real` ones */ } else
+{
             if (Ccompile && long_doublesize == 8)
                 goto default;
+}
             result = TOK.float80Literal;
             break;
         }
+
         if ((*p == 'i' || *p == 'I') && !Ccompile)
         {
             if (*p == 'I')
                 error("use 'i' suffix instead of 'I'");
             p++;
+            imaginary = true;
+        }
+
+        if (imaginary)
+        {
             switch (result)
             {
             case TOK.float32Literal:
@@ -2646,9 +2825,9 @@ class Lexer
         return result;
     }
 
-    final Loc loc() pure @nogc
+    final Loc loc() @nogc
     {
-        scanloc.charnum = cast(uint)(1 + p - line);
+        scanloc.charnum = cast(ushort)(1 + p - line);
         version (LocOffset)
             scanloc.fileOffset = cast(uint)(p - base);
         return scanloc;
@@ -3033,7 +3212,10 @@ class Lexer
         auto dc = (lineComment && anyToken) ? &t.lineComment : &t.blockComment;
         // Combine with previous doc comment, if any
         if (*dc)
-            *dc = combineComments(*dc, buf[], newParagraph).toDString();
+        {
+            auto p = combineComments(*dc, buf[], newParagraph);
+            *dc = p ? p[0 .. strlen(p)] : null;
+        }
         else
             *dc = buf.extractSlice(true);
     }
@@ -3069,10 +3251,28 @@ class Lexer
     /**************************
      * `p` should be at start of next line
      */
-    private void endOfLine() pure @nogc @safe
+    private void endOfLine() @nogc @safe
     {
-        scanloc.linnum++;
+        scanloc.linnum = scanloc.linnum + 1;
         line = p;
+    }
+
+    /****************************
+     * Print the tokens from the current `token` to the end,
+     * while not advancing the parser forward.
+     * Useful for debugging.
+     */
+    void printRestOfTokens()
+    {
+        auto tk = &token;
+        while (1)
+        {
+            printf("%s ", (*tk).toChars());
+            if (tk.value == TOK.endOfFile || tk.value == TOK.endOfLine)
+                break;
+            tk = peek(tk);
+        }
+        printf("\n");
     }
 }
 
@@ -3080,42 +3280,6 @@ class Lexer
 /******************************* Private *****************************************/
 
 private:
-
-/// Support for `__DATE__`, `__TIME__`, and `__TIMESTAMP__`
-private struct TimeStampInfo
-{
-    private __gshared bool initdone = false;
-
-    // Note: Those properties need to be guarded by a call to `init`
-    // The API isn't safe, and quite brittle, but it was left this way
-    // over performance concerns.
-    // This is currently only called once, from the lexer.
-    __gshared char[11 + 1] date;
-    __gshared char[8 + 1] time;
-    __gshared char[24 + 1] timestamp;
-
-    public static void initialize(const ref Loc loc, ErrorSink eSink) nothrow
-    {
-        if (initdone)
-            return;
-
-        initdone = true;
-        time_t ct;
-        // https://issues.dlang.org/show_bug.cgi?id=20444
-        if (auto p = getenv("SOURCE_DATE_EPOCH"))
-        {
-            if (!ct.parseDigits(p.toDString()))
-                eSink.error(loc, "value of environment variable `SOURCE_DATE_EPOCH` should be a valid UNIX timestamp, not: `%s`", p);
-        }
-        else
-            .time(&ct);
-        const p = ctime(&ct);
-        assert(p);
-        snprintf(&date[0], date.length, "%.6s %.4s", p + 4, p + 20);
-        snprintf(&time[0], time.length, "%.8s", p + 11);
-        snprintf(&timestamp[0], timestamp.length, "%.24s", p);
-    }
-}
 
 private enum LS = 0x2028;       // UTF line separator
 private enum PS = 0x2029;       // UTF paragraph separator
@@ -3366,7 +3530,7 @@ unittest
      */
     string text = "int"; // We rely on the implicit null-terminator
     ErrorSink errorSink = new ErrorSinkStderr;
-    scope Lexer lex1 = new Lexer(null, text.ptr, 0, text.length, false, false, errorSink);
+    scope Lexer lex1 = new Lexer(null, text.ptr, 0, text.length, false, false, errorSink, null);
     TOK tok;
     tok = lex1.nextToken();
     //printf("tok == %s, %d, %d\n", Token::toChars(tok), tok, TOK.int32);
@@ -3402,7 +3566,7 @@ unittest
 
     foreach (testcase; testcases)
     {
-        scope Lexer lex2 = new Lexer(null, testcase.ptr, 0, testcase.length-1, false, false, errorSink);
+        scope Lexer lex2 = new Lexer(null, testcase.ptr, 0, testcase.length-1, false, false, errorSink, null);
         TOK tok = lex2.nextToken();
         size_t iterations = 1;
         while ((tok != TOK.endOfFile) && (iterations++ < testcase.length))

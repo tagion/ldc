@@ -4,7 +4,7 @@
  * The AST is traversed, and every function call is considered for inlining using `inlinecost.d`.
  * The function call is then inlined if this cost is below a threshold.
  *
- * Copyright:   Copyright (C) 1999-2023 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2024 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 https://www.digitalmars.com, Walter Bright)
  * License:     $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
  * Source:    $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/inline.d, _inline.d)
@@ -18,7 +18,6 @@ import core.stdc.stdio;
 import core.stdc.string;
 
 import dmd.aggregate;
-import dmd.apply;
 import dmd.arraytypes;
 import dmd.astenums;
 import dmd.attrib;
@@ -40,6 +39,7 @@ import dmd.location;
 import dmd.mtype;
 import dmd.opover;
 import dmd.printast;
+import dmd.postordervisitor;
 import dmd.statement;
 import dmd.tokens;
 import dmd.visitor;
@@ -67,20 +67,25 @@ public void inlineScanModule(Module m)
     foreach (i; 0 .. m.members.length)
     {
         Dsymbol s = (*m.members)[i];
-        //if (global.params.verbose)
+        //if (global.params.v.verbose)
         //    message("inline scan symbol %s", s.toChars());
-        scope InlineScanVisitor v = new InlineScanVisitor();
-        s.accept(v);
+        inlineScanDsymbol(s);
     }
     m.semanticRun = PASS.inlinedone;
+}
+
+private void inlineScanDsymbol(Dsymbol s)
+{
+    scope InlineScanVisitorDsymbol v = new InlineScanVisitorDsymbol();
+    s.accept(v);
 }
 
 /***********************************************************
  * Perform the "inline copying" of a default argument for a function parameter.
  *
  * Todo:
- *  The hack for bugzilla 4820 case is still questionable. Perhaps would have to
- *  handle a delegate expression with 'null' context properly in front-end.
+ *  The hack for https://issues.dlang.org/show_bug.cgi?id=4820 case is still questionable.
+ *  Perhaps would have to handle a delegate expression with 'null' context properly in front-end.
  */
 public Expression inlineCopy(Expression e, Scope* sc)
 {
@@ -101,7 +106,7 @@ public Expression inlineCopy(Expression e, Scope* sc)
     int cost = inlineCostExpression(e);
     if (cost >= COST_MAX)
     {
-        e.error("cannot inline default argument `%s`", e.toChars());
+        error(e.loc, "cannot inline default argument `%s`", e.toChars());
         return ErrorExp.get();
     }
     scope ids = new InlineDoState(sc.parent, null);
@@ -666,7 +671,6 @@ public:
 version (IN_LLVM) {} else
 {
                 vto.csym = null;
-                vto.isym = null;
 }
 
                 ids.from.push(vd);
@@ -722,9 +726,20 @@ version (IN_LLVM) {} else
         {
             //printf("NewExp.doInlineAs!%s(): %s\n", Result.stringof.ptr, e.toChars());
             auto ne = e.copy().isNewExp();
+            auto lowering = ne.lowering;
+            if (lowering)
+                if (auto ce = lowering.isCallExp())
+                    if (ce.f.ident == Id._d_newarrayT || ce.f.ident == Id._d_newarraymTX)
+                    {
+                        ne.lowering = doInlineAs!Expression(lowering, ids);
+                        goto LhasLowering;
+                    }
+
             ne.thisexp = doInlineAs!Expression(e.thisexp, ids);
             ne.argprefix = doInlineAs!Expression(e.argprefix, ids);
             ne.arguments = arrayExpressionDoInline(e.arguments);
+
+        LhasLowering:
             result = ne;
 
             semanticTypeInfo(null, e.type);
@@ -743,6 +758,36 @@ version (IN_LLVM) {} else
             ae.e1 = doInlineAs!Expression(e.e1, ids);
             ae.msg = doInlineAs!Expression(e.msg, ids);
             result = ae;
+        }
+
+        override void visit(CatExp e)
+        {
+            auto ce = e.copy().isCatExp();
+
+            if (auto lowering = ce.lowering)
+                ce.lowering = doInlineAs!Expression(lowering, ids);
+            else
+            {
+                ce.e1 = doInlineAs!Expression(e.e1, ids);
+                ce.e2 = doInlineAs!Expression(e.e2, ids);
+            }
+
+            result = ce;
+        }
+
+        override void visit(CatAssignExp e)
+        {
+            auto cae = cast(CatAssignExp) e.copy();
+
+            if (auto lowering = cae.lowering)
+                cae.lowering = doInlineAs!Expression(cae.lowering, ids);
+            else
+            {
+                cae.e1 = doInlineAs!Expression(e.e1, ids);
+                cae.e2 = doInlineAs!Expression(e.e2, ids);
+            }
+
+            result = cae;
         }
 
         override void visit(BinExp e)
@@ -764,12 +809,11 @@ version (IN_LLVM) {} else
         override void visit(AssignExp e)
         {
             visit(cast(BinExp)e);
+        }
 
-            if (auto ale = e.e1.isArrayLengthExp())
-            {
-                Type tn = ale.e1.type.toBasetype().nextOf();
-                semanticTypeInfo(null, tn);
-            }
+        override void visit(LoweredAssignExp e)
+        {
+            result = doInlineAs!Expression(e.lowering, ids);
         }
 
         override void visit(EqualExp e)
@@ -805,7 +849,6 @@ version (IN_LLVM) {} else
 version (IN_LLVM) {} else
 {
                 vto.csym = null;
-                vto.isym = null;
 }
 
                 ids.from.push(vd);
@@ -837,7 +880,6 @@ version (IN_LLVM) {} else
 version (IN_LLVM) {} else
 {
                 vto.csym = null;
-                vto.isym = null;
 }
 
                 ids.from.push(vd);
@@ -952,7 +994,7 @@ public:
     Expression eresult;
     bool again;
 
-    extern (D) this() scope
+    extern (D) this() scope @safe
     {
     }
 
@@ -1225,7 +1267,7 @@ public:
         }
         else
         {
-            s.accept(this);
+            inlineScanDsymbol(s);
         }
     }
 
@@ -1244,6 +1286,26 @@ public:
     {
         inlineScan(e.e1);
         inlineScan(e.msg);
+    }
+
+    override void visit(CatExp e)
+    {
+        if (auto lowering = e.lowering)
+        {
+            inlineScan(lowering);
+            return;
+        }
+
+        inlineScan(e.e1);
+        inlineScan(e.e2);
+    }
+
+    override void visit(CatAssignExp e)
+    {
+        if (auto lowering = e.lowering)
+            inlineScan(lowering);
+        else
+            visit(cast(BinExp) e);
     }
 
     override void visit(BinExp e)
@@ -1288,6 +1350,11 @@ public:
         }
     L1:
         visit(cast(BinExp)e);
+    }
+
+    override void visit(LoweredAssignExp e)
+    {
+        inlineScan(e.lowering);
     }
 
     override void visit(CallExp e)
@@ -1449,7 +1516,7 @@ public:
             return;
         }
 
-        if (global.params.verbose && (eresult || sresult))
+        if (global.params.v.verbose && (eresult || sresult))
             message("inlined   %s =>\n          %s", fd.toPrettyChars(), parent.toPrettyChars());
 
         if (eresult && e.type.ty != Tvoid)
@@ -1497,7 +1564,7 @@ public:
         //printf("StructLiteralExp.inlineScan()\n");
         if (e.stageflags & stageInlineScan)
             return;
-        int old = e.stageflags;
+        const old = e.stageflags;
         e.stageflags |= stageInlineScan;
         arrayInlineScan(e.elements);
         e.stageflags = old;
@@ -1535,6 +1602,20 @@ public:
             eresult = null;
         }
     }
+}
+
+/***********************************************************
+ * Walk the trees, looking for functions to inline.
+ * Inline any that can be.
+ */
+private extern (C++) final class InlineScanVisitorDsymbol : Visitor
+{
+    alias visit = Visitor.visit;
+public:
+
+    extern (D) this() scope @safe
+    {
+    }
 
     /*************************************
      * Look for function inlining possibilities.
@@ -1556,20 +1637,20 @@ public:
             return;
         if (fd.fbody && !fd.isNaked())
         {
-            auto againsave = again;
-            auto parentsave = parent;
-            parent = fd;
-            do
+            while (1)
             {
-                again = false;
                 fd.inlineNest++;
                 fd.inlineScanned = true;
-                inlineScan(fd.fbody);
+
+                scope InlineScanVisitor v = new InlineScanVisitor();
+                v.parent = fd;
+                v.inlineScan(fd.fbody);
+                bool again = v.again;
+
                 fd.inlineNest--;
+                if (!again)
+                    break;
             }
-            while (again);
-            again = againsave;
-            parent = parentsave;
         }
     }
 
@@ -1708,7 +1789,8 @@ private bool canInline(FuncDeclaration fd, bool hasthis, bool hdrscan, bool stat
         TypeFunction tf = fd.type.isTypeFunction();
 
         // no variadic parameter lists
-        if (tf.parameterList.varargs == VarArg.variadic)
+        if (tf.parameterList.varargs == VarArg.variadic ||
+            tf.parameterList.varargs == VarArg.KRvariadic)
             goto Lno;
 
         /* No lazy parameters when inlining by statement, as the inliner tries to
@@ -1815,8 +1897,7 @@ private bool canInline(FuncDeclaration fd, bool hasthis, bool hdrscan, bool stat
         else
             fd.inlineStatusExp = ILS.yes;
 
-        scope InlineScanVisitor v = new InlineScanVisitor();
-        fd.accept(v); // Don't scan recursively for header content scan
+        inlineScanDsymbol(fd); // Don't scan recursively for header content scan
 
         if (fd.inlineStatusExp == ILS.uninitialized)
         {
@@ -2135,9 +2216,10 @@ private void expandInline(Loc callLoc, FuncDeclaration fd, FuncDeclaration paren
         auto e = doInlineAs!Expression(fd.fbody, ids);
         fd.inlineNest--;
 
+        import dmd.expressionsem : toLvalue;
         // https://issues.dlang.org/show_bug.cgi?id=11322
         if (tf.isref)
-            e = e.toLvalue(null, null);
+            e = e.toLvalue(null, "`ref` return");
 
         /* If the inlined function returns a copy of a struct,
          * and then the return value is used subsequently as an
@@ -2261,7 +2343,7 @@ private bool isConstruction(Expression e)
  * Returns:
  *      true if v's initializer is the only value assigned to v
  */
-private bool onlyOneAssign(VarDeclaration v, FuncDeclaration fd)
+private bool onlyOneAssign(VarDeclaration v, FuncDeclaration fd) @safe
 {
     if (!v.type.isMutable())
         return true;            // currently the only case handled atm
@@ -2307,7 +2389,7 @@ private bool expNeedsDtor(Expression exp)
         Expression exp;
 
     public:
-        extern (D) this(Expression exp) scope
+        extern (D) this(Expression exp) scope @safe
         {
             this.exp = exp;
         }

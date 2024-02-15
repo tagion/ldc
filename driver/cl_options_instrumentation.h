@@ -29,6 +29,9 @@ extern cl::opt<bool> instrumentFunctions;
 extern cl::opt<bool> fXRayInstrument;
 llvm::StringRef getXRayInstructionThresholdString();
 
+enum class CFProtectionType { None = 0, Branch = 1, Return = 2, Full = 3 };
+extern cl::opt<CFProtectionType> fCFProtection;
+
 /// This initializes the instrumentation options, and checks the validity of the
 /// commandline flags. targetTriple should be initialized before calling this.
 /// It should be called only once.
@@ -40,6 +43,7 @@ enum PGOKind {
   PGO_ASTBasedUse,
   PGO_IRBasedInstr,
   PGO_IRBasedUse,
+  PGO_SampleBasedUse,
 };
 extern PGOKind pgoMode;
 inline bool isInstrumentingForPGO() {
@@ -56,5 +60,8 @@ inline bool isInstrumentingForIRBasedPGO() {
   return pgoMode == PGO_IRBasedInstr;
 }
 inline bool isUsingIRBasedPGOProfile() { return pgoMode == PGO_IRBasedUse; }
+inline bool isUsingSampleBasedPGOProfile() {
+  return pgoMode == PGO_SampleBasedUse;
+}
 
 } // namespace opts

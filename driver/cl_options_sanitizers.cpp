@@ -206,12 +206,8 @@ void initializeSanitizerOptionsFromCmdline()
 
   if (isAnySanitizerEnabled() && !fSanitizeBlacklist.empty()) {
     std::string loadError;
-    sanitizerBlacklist =
-      llvm::SpecialCaseList::create(fSanitizeBlacklist,
-#if LDC_LLVM_VER >= 1000
-                                    *llvm::vfs::getRealFileSystem(),
-#endif
-                                    loadError);
+    sanitizerBlacklist = llvm::SpecialCaseList::create(
+        fSanitizeBlacklist, *llvm::vfs::getRealFileSystem(), loadError);
     if (!sanitizerBlacklist)
       error(Loc(), "-fsanitize-blacklist error: %s", loadError.c_str());
   }
@@ -237,7 +233,7 @@ bool functionIsInSanitizerBlacklist(FuncDeclaration *funcDecl) {
     return false;
 
   auto funcName = mangleExact(funcDecl);
-  auto fileName = funcDecl->loc.filename;
+  auto fileName = funcDecl->loc.filename();
 
   // TODO: LLVM supports sections (e.g. "[address]") in the blacklist file to
   // only blacklist a function for a particular sanitizer. We could make use of

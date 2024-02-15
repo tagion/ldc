@@ -33,7 +33,7 @@
 #include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/Attributes.h"
 #if LDC_LLVM_VER >= 1600
-#include "llvm/IR/ModRef.h"
+#include "llvm/Support/ModRef.h"
 #endif
 #include "llvm/IR/Module.h"
 #include "llvm/Support/CommandLine.h"
@@ -73,8 +73,6 @@ static void checkForImplicitGCCall(const Loc &loc, const char *name) {
         "_d_arrayappendcTX",
         "_d_arrayappendcd",
         "_d_arrayappendwd",
-        "_d_arraycatT",
-        "_d_arraycatnTX",
         "_d_arraysetlengthT",
         "_d_arraysetlengthiT",
         "_d_assocarrayliteralTX",
@@ -86,13 +84,10 @@ static void checkForImplicitGCCall(const Loc &loc, const char *name) {
         "_d_delmemory",
         "_d_newarrayT",
         "_d_newarrayiT",
-        "_d_newarraymTX",
-        "_d_newarraymiTX",
         "_d_newarrayU",
         "_d_newclass",
         "_d_allocclass",
-        "_d_newitemT",
-        "_d_newitemiT",
+        // TODO: _d_newitemT and _d_newarraymTX instantiations
     };
 
     if (binary_search(&GCNAMES[0],
@@ -253,7 +248,7 @@ struct LazyFunctionDeclarer {
         StorageClass stc = paramsSTC.empty() ? 0 : paramsSTC[i];
         Type *paramTy = paramTypes[i].get(loc);
         params->push(
-            Parameter::create(stc, paramTy, nullptr, nullptr, nullptr));
+            Parameter::create(Loc(), stc, paramTy, nullptr, nullptr, nullptr));
       }
     }
     Type *returnTy = returnType.get(loc);
@@ -457,7 +452,8 @@ static Type *rt_dg1() {
     return dg_t;
 
   auto params = createParameters();
-  params->push(Parameter::create(0, Type::tvoidptr, nullptr, nullptr, nullptr));
+  params->push(
+      Parameter::create(Loc(), 0, Type::tvoidptr, nullptr, nullptr, nullptr));
   auto fty = TypeFunction::create(params, Type::tint32, VARARGnone, LINK::d);
   dg_t = TypeDelegate::create(fty);
   return dg_t;
@@ -470,8 +466,10 @@ static Type *rt_dg2() {
     return dg2_t;
 
   auto params = createParameters();
-  params->push(Parameter::create(0, Type::tvoidptr, nullptr, nullptr, nullptr));
-  params->push(Parameter::create(0, Type::tvoidptr, nullptr, nullptr, nullptr));
+  params->push(
+      Parameter::create(Loc(), 0, Type::tvoidptr, nullptr, nullptr, nullptr));
+  params->push(
+      Parameter::create(Loc(), 0, Type::tvoidptr, nullptr, nullptr, nullptr));
   auto fty = TypeFunction::create(params, Type::tint32, VARARGnone, LINK::d);
   dg2_t = TypeDelegate::create(fty);
   return dg2_t;
@@ -601,29 +599,10 @@ static void buildRuntimeModule() {
                 {"_d_newarrayT", "_d_newarrayiT", "_d_newarrayU"},
                 {typeInfoTy, sizeTy}, {STCconst, 0});
 
-  // void[] _d_newarraymTX (const TypeInfo ti, size_t[] dims)
-  // void[] _d_newarraymiTX(const TypeInfo ti, size_t[] dims)
-  createFwdDecl(LINK::c, voidArrayTy, {"_d_newarraymTX", "_d_newarraymiTX"},
-                {typeInfoTy, sizeTy->arrayOf()}, {STCconst, 0});
-
-  // void[] _d_arraysetlengthT (const TypeInfo ti, size_t newlength, void[]* p)
-  // void[] _d_arraysetlengthiT(const TypeInfo ti, size_t newlength, void[]* p)
-  createFwdDecl(LINK::c, voidArrayTy,
-                {"_d_arraysetlengthT", "_d_arraysetlengthiT"},
-                {typeInfoTy, sizeTy, voidArrayPtrTy}, {STCconst, 0, 0});
-
   // void[] _d_arrayappendcd(ref byte[] x, dchar c)
   // void[] _d_arrayappendwd(ref byte[] x, dchar c)
   createFwdDecl(LINK::c, voidArrayTy, {"_d_arrayappendcd", "_d_arrayappendwd"},
                 {voidArrayTy, dcharTy}, {STCref, 0});
-
-  // byte[] _d_arraycatT(const TypeInfo ti, byte[] x, byte[] y)
-  createFwdDecl(LINK::c, voidArrayTy, {"_d_arraycatT"},
-                {typeInfoTy, voidArrayTy, voidArrayTy}, {STCconst, 0, 0});
-
-  // void[] _d_arraycatnTX(const TypeInfo ti, byte[][] arrs)
-  createFwdDecl(LINK::c, voidArrayTy, {"_d_arraycatnTX"},
-                {typeInfoTy, voidArrayTy->arrayOf()}, {STCconst, 0});
 
   // Object _d_newclass(const ClassInfo ci)
   // Object _d_allocclass(const ClassInfo ci)
@@ -633,11 +612,6 @@ static void buildRuntimeModule() {
   // Throwable _d_newThrowable(const ClassInfo ci)
   createFwdDecl(LINK::c, throwableTy, {"_d_newThrowable"}, {classInfoTy},
                 {STCconst});
-
-  // void* _d_newitemT (TypeInfo ti)
-  // void* _d_newitemiT(TypeInfo ti)
-  createFwdDecl(LINK::c, voidPtrTy, {"_d_newitemT", "_d_newitemiT"},
-                {typeInfoTy}, {0});
 
   // void _d_delarray_t(void[]* p, const TypeInfo_Struct ti)
   createFwdDecl(LINK::c, voidTy, {"_d_delarray_t"},
