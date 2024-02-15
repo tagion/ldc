@@ -33,7 +33,7 @@ unittest
 @("Type.deinitialize")
 unittest
 {
-    import dmd.mars : addDefaultVersionIdentifiers;
+    import dmd.target : addDefaultVersionIdentifiers;
     import dmd.mtype : Type;
     import dmd.globals : global;
 
@@ -123,8 +123,7 @@ unittest
 @("Expression.deinitialize")
 unittest
 {
-    import dmd.ctfeexpr : CTFEExp;
-    import dmd.expression : Expression;
+    import dmd.expression : Expression, CTFEExp;
 
     static void assertInitialState()
     {

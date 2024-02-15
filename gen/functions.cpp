@@ -162,7 +162,8 @@ llvm::FunctionType *DtoFunctionType(Type *type, IrFuncTy &irFty, Type *thistype,
     if (fd->objc.selector) {
       hasObjCSelector = true;
     } else if (fd->parent->isClassDeclaration()) {
-      fd->error("Objective-C `@selector` is missing");
+      error(fd->loc, "%s `%s` is missing Objective-C `@selector`", fd->kind(),
+            fd->toPrettyChars());
     }
   }
   if (hasObjCSelector) {
@@ -173,7 +174,8 @@ llvm::FunctionType *DtoFunctionType(Type *type, IrFuncTy &irFty, Type *thistype,
 
   // Non-typesafe variadics (both C and D styles) are also variadics on the LLVM
   // level.
-  const bool isLLVMVariadic = (f->parameterList.varargs == VARARGvariadic);
+  const bool isLLVMVariadic = (f->parameterList.varargs == VARARGvariadic ||
+                               f->parameterList.varargs == VARARGKRvariadic);
   if (isLLVMVariadic && f->linkage == LINK::d) {
     // Add extra `_arguments` parameter for D-style variadic functions.
     newIrFty.arg_arguments =
@@ -216,9 +218,7 @@ llvm::FunctionType *DtoFunctionType(Type *type, IrFuncTy &irFty, Type *thistype,
         // opaque struct
         if (!opts::fNullPointerIsValid)
           attrs.addAttribute(LLAttribute::NonNull);
-#if LDC_LLVM_VER >= 1100
         attrs.addAttribute(LLAttribute::NoUndef);
-#endif
       } else {
         attrs.addDereferenceableAttr(loweredDType->size());
       }
@@ -343,7 +343,10 @@ llvm::FunctionType *DtoFunctionType(FuncDeclaration *fdecl) {
     } else {
       IF_LOG Logger::println("chars: %s type: %s kind: %s", fdecl->toChars(),
                              fdecl->type->toChars(), fdecl->kind());
-      fdecl->error("requires a dual-context, which is not yet supported by LDC");
+      error(fdecl->loc,
+            "%s `%s` requires a dual-context, which is deprecated and not "
+            "supported by LDC",
+            fdecl->kind(), fdecl->toPrettyChars());
       if (!global.gag)
         fatal();
       return LLFunctionType::get(LLType::getVoidTy(gIR->context()),
@@ -426,8 +429,9 @@ void DtoResolveFunction(FuncDeclaration *fdecl, const bool willDeclare) {
           TypeFunction *tf = static_cast<TypeFunction *>(fdecl->type);
           if (tf->parameterList.varargs != VARARGvariadic ||
               (fdecl->parameters && fdecl->parameters->length != 0)) {
-            tempdecl->error("invalid `__asm` declaration, must be a D style "
-                            "variadic with no explicit parameters");
+            error(tempdecl->loc,
+                  "invalid `__asm` declaration, must be a D style "
+                  "variadic with no explicit parameters");
             fatal();
           }
           fdecl->llvmInternal = LLVMinline_asm;
@@ -497,42 +501,11 @@ void applyTargetMachineAttributes(llvm::Function &func,
   const auto cpu = dcompute ? "" : target.getTargetCPU();
   const auto features = dcompute ? "" : target.getTargetFeatureString();
 
-#if LDC_LLVM_VER >= 1000
   opts::setFunctionAttributes(cpu, features, func);
   if (opts::fFastMath) // -ffast-math[=true] overrides -enable-unsafe-fp-math
     func.addFnAttr("unsafe-fp-math", "true");
   if (!func.hasFnAttribute("frame-pointer")) // not explicitly set by user
     func.addFnAttr("frame-pointer", isOptimizationEnabled() ? "none" : "all");
-#else
-  if (!cpu.empty())
-    func.addFnAttr("target-cpu", cpu);
-  if (!features.empty())
-    func.addFnAttr("target-features", features);
-
-  // Floating point settings
-  const auto &TO = target.Options;
-  func.addFnAttr("unsafe-fp-math", TO.UnsafeFPMath ? "true" : "false");
-  // This option was removed from llvm::TargetOptions in LLVM 5.0.
-  // Clang sets this to true when `-cl-mad-enable` is passed (OpenCL only).
-  // TODO: implement interface for this option.
-  const bool lessPreciseFPMADOption = false;
-  func.addFnAttr("less-precise-fpmad",
-                 lessPreciseFPMADOption ? "true" : "false");
-  func.addFnAttr("no-infs-fp-math", TO.NoInfsFPMath ? "true" : "false");
-  func.addFnAttr("no-nans-fp-math", TO.NoNaNsFPMath ? "true" : "false");
-
-  switch (whichFramePointersToEmit()) {
-    case llvm::FramePointer::None:
-      func.addFnAttr("frame-pointer", "none");
-      break;
-    case llvm::FramePointer::NonLeaf:
-      func.addFnAttr("frame-pointer", "non-leaf");
-      break;
-    case llvm::FramePointer::All:
-      func.addFnAttr("frame-pointer", "all");
-      break;
-  }
-#endif // LDC_LLVM_VER < 1000
 }
 
 void applyXRayAttributes(FuncDeclaration &fdecl, llvm::Function &func) {
@@ -558,18 +531,18 @@ void onlyOneMainCheck(FuncDeclaration *fd) {
   if (fd->isMain() || (global.params.betterC && fd->isCMain()) ||
       (isOSWindows && (fd->isWinMain() || fd->isDllMain()))) {
     // global - across all modules compiled in this compiler invocation
-    static Loc mainLoc;
-    if (!mainLoc.filename) {
-      mainLoc = fd->loc;
-      assert(mainLoc.filename);
+    static FuncDeclaration *lastMain = nullptr;
+    if (!lastMain) {
+      lastMain = fd;
     } else {
-      const char *otherMainNames =
-          isOSWindows ? ", `WinMain`, or `DllMain`" : "";
+      const char *otherEntryPoints =
+          isOSWindows ? ", `WinMain` or `DllMain`" : "";
       const char *mainSwitch =
-          global.params.addMain ? ", -main switch added another `main()`" : "";
-      error(fd->loc,
-            "only one `main`%s allowed%s. Previously found `main` at %s",
-            otherMainNames, mainSwitch, mainLoc.toChars());
+          global.params.addMain ? ", -main switch added another `main`" : "";
+      error(fd->loc, "only one entry point `main`%s is allowed%s",
+            otherEntryPoints, mainSwitch);
+      errorSupplemental(lastMain->loc, "previously found `%s` here",
+                        lastMain->toFullSignature());
     }
   }
 }
@@ -864,13 +837,14 @@ void verifyScopedDestructionInClosure(FuncDeclaration *fd) {
     bool isScopeDtorParam = v->edtor && (v->storage_class & STCparameter);
     if (v->needsScopeDtor() || isScopeDtorParam) {
       // Because the value needs to survive the end of the scope!
-      v->error("has scoped destruction, cannot build closure");
+      error(v->loc, "%s `%s` has scoped destruction, cannot build closure",
+            v->kind(), v->toPrettyChars());
     }
     if (v->isargptr()) {
       // See https://issues.dlang.org/show_bug.cgi?id=2479
       // This is actually a bug, but better to produce a nice
       // message at compile time rather than memory corruption at runtime
-      v->error("cannot reference variadic arguments from closure");
+      error(v->loc, "cannot reference variadic arguments from closure");
     }
   }
 }
@@ -908,7 +882,12 @@ void defineParameters(IrFuncTy &irFty, VarDeclarations &parameters) {
       if (irparam->arg->byref) {
         // The argument is an appropriate lvalue passed by reference.
         // Use the passed pointer as parameter storage.
+#if LDC_LLVM_VER >= 1700 // LLVM >= 17 uses opaque pointers, type check boils
+                         // down to pointer check only.
+        assert(irparam->value->getType()->isPointerTy());
+#else
         assert(irparam->value->getType() == DtoPtrToType(paramType));
+#endif
       } else {
         // Let the ABI transform the parameter back to an lvalue.
         irparam->value =
@@ -1154,20 +1133,23 @@ void DtoDefineFunction(FuncDeclaration *fd, bool linkageAvailableExternally) {
     // ignore unparsed unittests from non-root modules
     if (fd->fbody)
       getIrModule(gIR->dmodule)->unitTests.push_back(fd);
-  } else if (fd->isSharedStaticCtorDeclaration()) {
-    getIrModule(gIR->dmodule)->sharedCtors.push_back(fd);
-  } else if (StaticDtorDeclaration *dtorDecl =
-                 fd->isSharedStaticDtorDeclaration()) {
+  } else if (auto sctor = fd->isSharedStaticCtorDeclaration()) {
+    if (sctor->standalone) {
+      getIrModule(gIR->dmodule)->standaloneSharedCtors.push_back(fd);
+    } else {
+      getIrModule(gIR->dmodule)->sharedCtors.push_back(fd);
+    }
+  } else if (auto sdtor = fd->isSharedStaticDtorDeclaration()) {
     getIrModule(gIR->dmodule)->sharedDtors.push_front(fd);
-    if (dtorDecl->vgate) {
-      getIrModule(gIR->dmodule)->sharedGates.push_front(dtorDecl->vgate);
+    if (sdtor->vgate) {
+      getIrModule(gIR->dmodule)->sharedGates.push_front(sdtor->vgate);
     }
   } else if (fd->isStaticCtorDeclaration()) {
     getIrModule(gIR->dmodule)->ctors.push_back(fd);
-  } else if (StaticDtorDeclaration *dtorDecl = fd->isStaticDtorDeclaration()) {
+  } else if (auto dtor = fd->isStaticDtorDeclaration()) {
     getIrModule(gIR->dmodule)->dtors.push_front(fd);
-    if (dtorDecl->vgate) {
-      getIrModule(gIR->dmodule)->gates.push_front(dtorDecl->vgate);
+    if (dtor->vgate) {
+      getIrModule(gIR->dmodule)->gates.push_front(dtor->vgate);
     }
   }
 
@@ -1254,14 +1236,13 @@ void DtoDefineFunction(FuncDeclaration *fd, bool linkageAvailableExternally) {
   }
   applyXRayAttributes(*fd, *func);
   if (opts::fNullPointerIsValid) {
-#if LDC_LLVM_VER >= 1100
     func->addFnAttr(LLAttribute::NullPointerIsValid);
-#else
-    func->addFnAttr("null-pointer-is-valid", "true");
-#endif
   }
   if (opts::fSplitStack && !hasNoSplitStackUDA(fd)) {
     func->addFnAttr("split-stack");
+  }
+  if (opts::isUsingSampleBasedPGOProfile()) {
+    func->addFnAttr("use-sample-profile");
   }
 
   llvm::BasicBlock *beginbb =

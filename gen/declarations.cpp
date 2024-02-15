@@ -89,7 +89,8 @@ public:
     }
 
     if (decl->type->ty == TY::Terror) {
-      decl->error("had semantic errors when compiling");
+      error(decl->loc, "%s `%s` had semantic errors when compiling",
+            decl->kind(), decl->toPrettyChars());
       decl->ir->setDefined();
       return;
     }
@@ -125,7 +126,8 @@ public:
     }
 
     if (decl->type->ty == TY::Terror) {
-      decl->error("had semantic errors when compiling");
+      error(decl->loc, "%s `%s` had semantic errors when compiling",
+            decl->kind(), decl->toPrettyChars());
       decl->ir->setDefined();
       return;
     }
@@ -184,7 +186,8 @@ public:
     }
 
     if (decl->type->ty == TY::Terror) {
-      decl->error("had semantic errors when compiling");
+      error(decl->loc, "%s `%s` had semantic errors when compiling",
+            decl->kind(), decl->toPrettyChars());
       decl->ir->setDefined();
       return;
     }
@@ -241,7 +244,8 @@ public:
     }
 
     if (decl->type->ty == TY::Terror) {
-      decl->error("had semantic errors when compiling");
+      error(decl->loc, "%s `%s` had semantic errors when compiling",
+            decl->kind(), decl->toPrettyChars());
       decl->ir->setDefined();
       return;
     }
@@ -275,7 +279,8 @@ public:
                            decl->toPrettyChars());
 
     if (decl->type->ty == TY::Terror) {
-      decl->error("had semantic errors when compiling");
+      error(decl->loc, "%s `%s` had semantic errors when compiling",
+            decl->kind(), decl->toPrettyChars());
       return;
     }
   }
@@ -419,12 +424,23 @@ public:
         std::string arg = ("/DEFAULTLIB:\"" + name + "\"").str();
         gIR->addLinkerOption(llvm::StringRef(arg));
       } else {
-        size_t const n = name.size() + 3;
-        char *arg = static_cast<char *>(mem.xmalloc(n));
-        arg[0] = '-';
-        arg[1] = 'l';
-        memcpy(arg + 2, name.data(), name.size());
-        arg[n - 1] = 0;
+        const bool isStaticLib = name.endswith(".a");
+        const size_t nameLen = name.size();
+
+        char *arg = nullptr;
+        if (!isStaticLib) { // name => -lname
+          const size_t n = nameLen + 3;
+          arg = static_cast<char *>(mem.xmalloc(n));
+          arg[0] = '-';
+          arg[1] = 'l';
+          memcpy(arg + 2, name.data(), nameLen);
+          arg[n - 1] = 0;
+        } else {
+          arg = static_cast<char *>((mem.xmalloc(nameLen + 1)));
+          memcpy(arg, name.data(), nameLen);
+          arg[nameLen] = 0;
+        }
+
         global.params.linkswitches.push(arg);
 
         if (triple.isOSBinFormatMachO()) {

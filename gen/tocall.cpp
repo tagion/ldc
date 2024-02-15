@@ -288,14 +288,16 @@ bool DtoLowerMagicIntrinsic(IRState *p, FuncDeclaration *fndecl, CallExp *e,
   // va_start instruction
   if (fndecl->llvmInternal == LLVMva_start) {
     if (e->arguments->length < 1 || e->arguments->length > 2) {
-      e->error("`va_start` instruction expects 1 (or 2) arguments");
+      error(e->loc, "`va_start` instruction expects 1 (or 2) arguments");
       fatal();
     }
     DLValue *ap = toElem((*e->arguments)[0])->isLVal(); // va_list
     assert(ap);
     // variadic extern(D) function with implicit _argptr?
     if (LLValue *argptrMem = p->func()->_argptr) {
-      DtoMemCpy(DtoType(ap->type), DtoLVal(ap), argptrMem); // ap = _argptr
+      // then va_copy the _argptr
+      DLValue argptr(ap->type, argptrMem);
+      gABI->vaCopy(ap, &argptr);
     } else {
       LLValue *llAp = gABI->prepareVaStart(ap);
       p->ir->CreateCall(GET_INTRINSIC_DECL(vastart), llAp, "");
@@ -307,7 +309,7 @@ bool DtoLowerMagicIntrinsic(IRState *p, FuncDeclaration *fndecl, CallExp *e,
   // va_copy instruction
   if (fndecl->llvmInternal == LLVMva_copy) {
     if (e->arguments->length != 2) {
-      e->error("`va_copy` instruction expects 2 arguments");
+      error(e->loc, "`va_copy` instruction expects 2 arguments");
       fatal();
     }
     DLValue *dest = toElem((*e->arguments)[0])->isLVal(); // va_list
@@ -321,11 +323,12 @@ bool DtoLowerMagicIntrinsic(IRState *p, FuncDeclaration *fndecl, CallExp *e,
   // va_arg instruction
   if (fndecl->llvmInternal == LLVMva_arg) {
     if (e->arguments->length != 1) {
-      e->error("`va_arg` instruction expects 1 argument");
+      error(e->loc, "`va_arg` instruction expects 1 argument");
       fatal();
     }
     if (DtoIsInMemoryOnly(e->type)) {
-      e->error("`va_arg` instruction does not support structs and static arrays");
+      error(e->loc,
+            "`va_arg` instruction does not support structs and static arrays");
       fatal();
     }
     DLValue *ap = toElem((*e->arguments)[0])->isLVal(); // va_list
@@ -339,7 +342,7 @@ bool DtoLowerMagicIntrinsic(IRState *p, FuncDeclaration *fndecl, CallExp *e,
   // va_end instruction
   if (fndecl->llvmInternal == LLVMva_end) {
     if (e->arguments->length != 1) {
-      e->error("`va_end` instruction expects 1 argument");
+      error(e->loc, "`va_end` instruction expects 1 argument");
       fatal();
     }
     DLValue *ap = toElem((*e->arguments)[0])->isLVal(); // va_list
@@ -353,7 +356,7 @@ bool DtoLowerMagicIntrinsic(IRState *p, FuncDeclaration *fndecl, CallExp *e,
   // C alloca
   if (fndecl->llvmInternal == LLVMalloca) {
     if (e->arguments->length != 1) {
-      e->error("`alloca` expects 1 argument");
+      error(e->loc, "`alloca` expects 1 argument");
       fatal();
     }
     Expression *exp = (*e->arguments)[0];
@@ -370,7 +373,7 @@ bool DtoLowerMagicIntrinsic(IRState *p, FuncDeclaration *fndecl, CallExp *e,
   // fence instruction
   if (fndecl->llvmInternal == LLVMfence) {
     if (e->arguments->length < 1 || e->arguments->length > 2) {
-      e->error("`fence` instruction expects 1 (or 2) arguments");
+      error(e->loc, "`fence` instruction expects 1 (or 2) arguments");
       fatal();
     }
     auto atomicOrdering =
@@ -379,14 +382,19 @@ bool DtoLowerMagicIntrinsic(IRState *p, FuncDeclaration *fndecl, CallExp *e,
     if (e->arguments->length == 2) {
       scope = static_cast<llvm::SyncScope::ID>((*e->arguments)[1]->toInteger());
     }
-    p->ir->CreateFence(atomicOrdering, scope);
+    // orderings below acquire are invalid; like clang, don't emit any
+    // instruction in those cases
+    if (static_cast<int>(atomicOrdering) >
+        static_cast<int>(llvm::AtomicOrdering::Monotonic)) {
+      p->ir->CreateFence(atomicOrdering, scope);
+    }
     return true;
   }
 
   // atomic store instruction
   if (fndecl->llvmInternal == LLVMatomic_store) {
     if (e->arguments->length != 3) {
-      e->error("atomic store instruction expects 3 arguments");
+      error(e->loc, "atomic store instruction expects 3 arguments");
       fatal();
     }
     Expression *exp1 = (*e->arguments)[0];
@@ -406,7 +414,7 @@ bool DtoLowerMagicIntrinsic(IRState *p, FuncDeclaration *fndecl, CallExp *e,
       auto lval = makeLValue(exp1->loc, dval);
       val = DtoLoad(atype, DtoBitCast(lval, intPtrType));
     } else {
-      e->error(
+      error(e->loc,
           "atomic store only supports types of size 1/2/4/8/16 bytes, not `%s`",
           exp1->type->toChars());
       fatal();
@@ -415,7 +423,7 @@ bool DtoLowerMagicIntrinsic(IRState *p, FuncDeclaration *fndecl, CallExp *e,
     llvm::StoreInst *ret = p->ir->CreateStore(val, ptr);
     ret->setAtomic(llvm::AtomicOrdering(atomicOrdering));
     if (auto alignment = getTypeAllocSize(val->getType())) {
-      ret->setAlignment(LLAlign(alignment));
+      ret->setAlignment(llvm::Align(alignment));
     }
     return true;
   }
@@ -423,7 +431,7 @@ bool DtoLowerMagicIntrinsic(IRState *p, FuncDeclaration *fndecl, CallExp *e,
   // atomic load instruction
   if (fndecl->llvmInternal == LLVMatomic_load) {
     if (e->arguments->length != 2) {
-      e->error("atomic load instruction expects 2 arguments");
+      error(e->loc, "atomic load instruction expects 2 arguments");
       fatal();
     }
 
@@ -440,16 +448,17 @@ bool DtoLowerMagicIntrinsic(IRState *p, FuncDeclaration *fndecl, CallExp *e,
         ptr = DtoBitCast(ptr, intPtrType);
         loadedType = getAtomicType(pointeeType);
       } else {
-        e->error("atomic load only supports types of size 1/2/4/8/16 bytes, "
-                 "not `%s`",
-                 retType->toChars());
+        error(e->loc,
+              "atomic load only supports types of size 1/2/4/8/16 bytes, "
+              "not `%s`",
+              retType->toChars());
         fatal();
       }
     }
 
     llvm::LoadInst *load = p->ir->CreateLoad(loadedType, ptr);
     if (auto alignment = getTypeAllocSize(loadedType)) {
-      load->setAlignment(LLAlign(alignment));
+      load->setAlignment(llvm::Align(alignment));
     }
     load->setAtomic(llvm::AtomicOrdering(atomicOrdering));
     llvm::Value *val = load;
@@ -465,11 +474,11 @@ bool DtoLowerMagicIntrinsic(IRState *p, FuncDeclaration *fndecl, CallExp *e,
   // cmpxchg instruction
   if (fndecl->llvmInternal == LLVMatomic_cmp_xchg) {
     if (e->arguments->length != 6) {
-      e->error("`cmpxchg` instruction expects 6 arguments");
+      error(e->loc, "`cmpxchg` instruction expects 6 arguments");
       fatal();
     }
     if (e->type->ty != TY::Tstruct) {
-      e->error("`cmpxchg` instruction returns a struct");
+      error(e->loc, "`cmpxchg` instruction returns a struct");
       fatal();
     }
     Expression *exp1 = (*e->arguments)[0];
@@ -499,9 +508,9 @@ bool DtoLowerMagicIntrinsic(IRState *p, FuncDeclaration *fndecl, CallExp *e,
       auto lval = makeLValue(exp3->loc, dval);
       val = DtoLoad(atype, DtoBitCast(lval, intPtrType));
     } else {
-      e->error(
-          "`cmpxchg` only supports types of size 1/2/4/8/16 bytes, not `%s`",
-          exp2->type->toChars());
+      error(e->loc,
+            "`cmpxchg` only supports types of size 1/2/4/8/16 bytes, not `%s`",
+            exp2->type->toChars());
       fatal();
     }
 
@@ -529,7 +538,7 @@ bool DtoLowerMagicIntrinsic(IRState *p, FuncDeclaration *fndecl, CallExp *e,
   // atomicrmw instruction
   if (fndecl->llvmInternal == LLVMatomic_rmw) {
     if (e->arguments->length != 3) {
-      e->error("`atomicrmw` instruction expects 3 arguments");
+      error(e->loc, "`atomicrmw` instruction expects 3 arguments");
       fatal();
     }
 
@@ -540,8 +549,8 @@ bool DtoLowerMagicIntrinsic(IRState *p, FuncDeclaration *fndecl, CallExp *e,
     int op = 0;
     for (;; ++op) {
       if (ops[op] == nullptr) {
-        e->error("unknown `atomicrmw` operation `%s`",
-                 fndecl->intrinsicName);
+        error(e->loc, "unknown `atomicrmw` operation `%s`",
+              fndecl->intrinsicName);
         fatal();
       }
       if (strcmp(fndecl->intrinsicName, ops[op]) == 0) {
@@ -570,7 +579,7 @@ bool DtoLowerMagicIntrinsic(IRState *p, FuncDeclaration *fndecl, CallExp *e,
       fndecl->llvmInternal == LLVMbitop_btc ||
       fndecl->llvmInternal == LLVMbitop_bts) {
     if (e->arguments->length != 2) {
-      e->error("bitop intrinsic expects 2 arguments");
+      error(e->loc, "bitop intrinsic expects 2 arguments");
       fatal();
     }
 
@@ -625,7 +634,7 @@ bool DtoLowerMagicIntrinsic(IRState *p, FuncDeclaration *fndecl, CallExp *e,
 
   if (fndecl->llvmInternal == LLVMbitop_vld) {
     if (e->arguments->length != 1) {
-      e->error("`bitop.vld` intrinsic expects 1 argument");
+      error(e->loc, "`bitop.vld` intrinsic expects 1 argument");
       fatal();
     }
     // TODO: Check types
@@ -638,7 +647,7 @@ bool DtoLowerMagicIntrinsic(IRState *p, FuncDeclaration *fndecl, CallExp *e,
 
   if (fndecl->llvmInternal == LLVMbitop_vst) {
     if (e->arguments->length != 2) {
-      e->error("`bitop.vst` intrinsic expects 2 arguments");
+      error(e->loc, "`bitop.vst` intrinsic expects 2 arguments");
       fatal();
     }
     // TODO: Check types
@@ -819,7 +828,7 @@ private:
 
 ////////////////////////////////////////////////////////////////////////////////
 
-static LLValue *DtoCallableValue(llvm::FunctionType * ft,DValue *fn) {
+static LLValue *DtoCallableValue(DValue *fn) {
   Type *type = fn->type->toBasetype();
   if (type->ty == TY::Tfunction) {
     return DtoRVal(fn);
@@ -829,7 +838,7 @@ static LLValue *DtoCallableValue(llvm::FunctionType * ft,DValue *fn) {
       LLValue *dg = DtoLVal(fn);
       llvm::StructType *st = isaStruct(DtoType(fn->type));
       LLValue *funcptr = DtoGEP(st, dg, 0, 1);
-      return DtoLoad(ft->getPointerTo(), funcptr, ".funcptr");
+      return DtoLoad(st->getElementType(1), funcptr, ".funcptr");
     }
     LLValue *dg = DtoRVal(fn);
     assert(isaStruct(dg));
@@ -862,7 +871,7 @@ DValue *DtoCallFunction(const Loc &loc, Type *resulttype, DValue *fnval,
   }
 
   // get callee llvm value
-  LLValue *callable = DtoCallableValue(irFty.funcType, fnval);
+  LLValue *callable = DtoCallableValue(fnval);
   LLFunctionType *callableTy = irFty.funcType;
   if (dfnval && dfnval->func->isCsymbol()) {
     // See note in DtoDeclareFunction about K&R foward declared (void) functions
@@ -916,8 +925,8 @@ DValue *DtoCallFunction(const Loc &loc, Type *resulttype, DValue *fnval,
   }
 
   // call the function
-  LLCallBasePtr call = gIR->funcGen().callOrInvoke(callable, callableTy, args,
-                                                   "", tf->isnothrow());
+  llvm::CallBase *call = gIR->funcGen().callOrInvoke(callable, callableTy, args,
+                                                     "", tf->isnothrow());
 
   // PGO: Insert instrumentation or attach profile metadata at indirect call
   // sites.

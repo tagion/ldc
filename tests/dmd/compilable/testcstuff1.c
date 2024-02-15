@@ -201,17 +201,25 @@ _Static_assert(testexpinit() == 1 + 2 + 3, "ok");
 
 /********************************/
 
+__declspec(restrict) void* testrestrictdeclspec()
+{
+    return 0;
+}
+
+/********************************/
+
 // Character literals
 _Static_assert(sizeof('a') == 4, "ok");
-_Static_assert(sizeof(u'a') == 4, "ok");
+_Static_assert(sizeof(u'a') == 2, "ok");
 _Static_assert(sizeof(U'a') == 4, "ok");
 _Static_assert('a' == 0x61, "ok");
 _Static_assert('ab' == 0x6162, "ok");
 _Static_assert('abc' == 0x616263, "ok");
 _Static_assert('abcd' == 0x61626364, "ok");
 _Static_assert(u'a' == 0x61, "ok");
-_Static_assert(u'ab' == 0x610062, "ok");
+_Static_assert(u'ab' == 0x62, "ok");
 _Static_assert(U'a' == 0x61, "ok");
+_Static_assert(U'a' - 500 > 0, "ok");
 _Static_assert(u'\u1234' == 0x1234, "ok");
 _Static_assert(L'\u1234' == 0x1234, "ok");
 
@@ -272,7 +280,8 @@ void test2()
     typedef int TI;
     //extern int ei;
     static int si;
-    _Thread_local int tli;
+    static _Thread_local int tli;
+    int __declspec(thread) tlj;
     auto int ai;
     register int reg;
     const int ci;

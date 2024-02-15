@@ -54,7 +54,7 @@ import dmd.parse;
 import dmd.root.filename;
 import dmd.common.outbuffer;
 import dmd.root.rmem;
-import dmd.root.rootobject;
+import dmd.rootobject;
 import dmd.semantic2;
 import dmd.semantic3;
 import dmd.sideeffect;
@@ -131,7 +131,7 @@ extern(C++) final class SemanticTimeTraceVisitor(SemaVisitor) : Visitor
 
     override void visit(StaticForeachDeclaration sfd) { semavisitor.visit(sfd); }
 
-    override void visit(CompileDeclaration cd) { semavisitor.visit(cd); }
+    override void visit(MixinDeclaration md) { semavisitor.visit(md); }
 
     override void visit(CPPNamespaceDeclaration ns) { semavisitor.visit(ns); }
 

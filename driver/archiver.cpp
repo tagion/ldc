@@ -14,15 +14,18 @@
 #include "driver/timetrace.h"
 #include "driver/tool.h"
 #include "gen/logger.h"
+#if LDC_LLVM_VER < 1700
 #include "llvm/ADT/Triple.h"
+#include "llvm/Support/Host.h"
+#else
+#include "llvm/TargetParser/Host.h"
+#include "llvm/TargetParser/Triple.h"
+#endif
 #include "llvm/Object/Archive.h"
 #include "llvm/Object/ArchiveWriter.h"
 #include "llvm/Object/MachO.h"
 #include "llvm/Object/ObjectFile.h"
 #include "llvm/Support/Errc.h"
-#if LDC_LLVM_VER >= 1100
-#include "llvm/Support/Host.h"
-#endif
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/ToolDrivers/llvm-lib/LibDriver.h"
@@ -341,7 +344,7 @@ int createStaticLibrary() {
 
   if (useInternalArchiver) {
     const auto fullArgs =
-        getFullArgs(tool.c_str(), args, global.params.verbose);
+        getFullArgs(tool.c_str(), args, global.params.v.verbose);
 
     const int exitCode =
         isTargetMSVC ? internalLib(fullArgs) : internalAr(fullArgs);
@@ -352,7 +355,7 @@ int createStaticLibrary() {
   }
 
   // invoke external archiver
-  return executeToolAndWait(Loc(), tool, args, global.params.verbose);
+  return executeToolAndWait(Loc(), tool, args, global.params.v.verbose);
 }
 
 const char *getPathToProducedStaticLibrary() {

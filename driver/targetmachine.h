@@ -14,7 +14,16 @@
 
 #pragma once
 
+#if LDC_LLVM_VER < 1700
 #include "llvm/ADT/Optional.h"
+#else
+#include <optional>
+namespace llvm {
+template <typename T> using Optional = std::optional<T>;
+}
+#endif
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/CodeGen.h"
 #include <string>
 #include <vector>
@@ -73,4 +82,8 @@ MipsABI::Type getMipsABI();
 const llvm::Target *lookupTarget(const std::string &arch, llvm::Triple &triple,
                                  std::string &errorMsg);
 
-const char *getABI(const llvm::Triple &triple);
+const char *getABI(const llvm::Triple &triple,
+                   const llvm::SmallVectorImpl<llvm::StringRef> &features);
+
+bool isFeatureEnabled(const llvm::SmallVectorImpl<llvm::StringRef> &features,
+                      llvm::StringRef feature);

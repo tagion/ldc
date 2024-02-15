@@ -46,7 +46,7 @@ void RTTIBuilder::push(llvm::Constant *C) {
   // We need to explicitly zero any padding bytes as per TDPL §7.1.1 (and
   // also match the struct type lowering code here).
   const uint64_t fieldStart = llvm::alignTo(
-      prevFieldEnd, gDataLayout->getABITypeAlignment(C->getType()));
+      prevFieldEnd, gDataLayout->getABITypeAlign(C->getType()).value());
 
   const uint64_t paddingBytes = fieldStart - prevFieldEnd;
   if (paddingBytes) {
@@ -78,7 +78,7 @@ void RTTIBuilder::push_void_array(uint64_t dim, llvm::Constant *ptr) {
 void RTTIBuilder::push_void_array(llvm::Constant *CI, Type *valtype,
                                   Dsymbol *mangle_sym) {
   OutBuffer initname;
-  mangleToBuffer(mangle_sym, &initname);
+  mangleToBuffer(mangle_sym, initname);
   initname.writestring(".rtti.voidarr.data");
 
   const LinkageWithCOMDAT lwc(TYPEINFO_LINKAGE_TYPE, needsCOMDAT());
@@ -86,7 +86,7 @@ void RTTIBuilder::push_void_array(llvm::Constant *CI, Type *valtype,
   auto G = new LLGlobalVariable(gIR->module, CI->getType(), true, lwc.first, CI,
                                 initname.peekChars());
   setLinkage(lwc, G);
-  G->setAlignment(LLMaybeAlign(DtoAlignment(valtype)));
+  G->setAlignment(llvm::MaybeAlign(DtoAlignment(valtype)));
 
   push_void_array(getTypeAllocSize(CI->getType()), G);
 }
@@ -100,7 +100,7 @@ void RTTIBuilder::push_array(llvm::Constant *CI, uint64_t dim, Type *valtype,
 
   OutBuffer initname;
   if (mangle_sym)
-    mangleToBuffer(mangle_sym, &initname);
+    mangleToBuffer(mangle_sym, initname);
   else
     initname.writestring(".ldc");
   initname.writestring(".rtti.");
@@ -112,7 +112,7 @@ void RTTIBuilder::push_array(llvm::Constant *CI, uint64_t dim, Type *valtype,
   auto G = new LLGlobalVariable(gIR->module, CI->getType(), true, lwc.first, CI,
                                 initname.peekChars());
   setLinkage(lwc, G);
-  G->setAlignment(LLMaybeAlign(DtoAlignment(valtype)));
+  G->setAlignment(llvm::MaybeAlign(DtoAlignment(valtype)));
 
   push_array(dim, DtoBitCast(G, DtoType(valtype->pointerTo())));
 }

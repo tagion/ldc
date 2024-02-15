@@ -95,7 +95,12 @@ void appendTargetArgsForGcc(std::vector<std::string> &args) {
   case Triple::nvptx64:
     args.push_back(triple.isArch64Bit() ? "-m64" : "-m32");
     return;
-
+#if LDC_LLVM_VER >= 1600
+  // LoongArch does not use -m32/-m64 and uses -mabi=.
+  case Triple::loongarch64:
+    args.emplace_back(triple.isArch64Bit() ? "-mabi=lp64d" : "-mabi=ilp32d");
+    return;
+#endif // LDC_LLVM_VER >= 1600
   // MIPS does not have -m32/-m64 but requires -mabi=.
   case Triple::mips64:
   case Triple::mips64el:
@@ -121,62 +126,45 @@ void appendTargetArgsForGcc(std::vector<std::string> &args) {
     }
     return;
 
-  case Triple::riscv64:
-    {
-      std::string mabi = getABI(triple);
-      args.push_back("-mabi=" + mabi);
+  case Triple::riscv64: {
+    extern llvm::TargetMachine* gTargetMachine;
+    const auto featuresStr = gTargetMachine->getTargetFeatureString();
+    llvm::SmallVector<llvm::StringRef, 8> features;
+    featuresStr.split(features, ",", -1, false);
 
-      extern llvm::TargetMachine* gTargetMachine;
-      auto featuresStr = gTargetMachine->getTargetFeatureString();
-      llvm::SmallVector<llvm::StringRef, 8> features;
-      featuresStr.split(features, ",", -1, false);
+    const std::string mabi = getABI(triple, features);
+    args.push_back("-mabi=" + mabi);
 
-      // Returns true if 'feature' is enabled and false otherwise. Handles the
-      // case where the feature is specified multiple times ('+m,-m'), and
-      // takes the last occurrence.
-      auto hasFeature = [&features](llvm::StringRef feature) {
-        for (int i = features.size() - 1; i >= 0; i--) {
-          auto f = features[i];
-          if (f.substr(1) == feature) {
-            return f[0] == '+';
-          }
-        }
-        return false;
-      };
+    std::string march = triple.isArch64Bit() ? "rv64" : "rv32";
+    const bool m = isFeatureEnabled(features, "m");
+    const bool a = isFeatureEnabled(features, "a");
+    const bool f = isFeatureEnabled(features, "f");
+    const bool d = isFeatureEnabled(features, "d");
+    const bool c = isFeatureEnabled(features, "c");
+    bool g = false;
 
-      std::string march;
-      if (triple.isArch64Bit())
-        march = "rv64";
-      else
-        march = "rv32";
-      bool m = hasFeature("m");
-      bool a = hasFeature("a");
-      bool f = hasFeature("f");
-      bool d = hasFeature("d");
-      bool c = hasFeature("c");
-      bool g = false;
-
-      if (m && a && f && d) {
-        march += "g";
-        g = true;
-      } else {
-        march += "i";
-        if (m)
-          march += "m";
-        if (a)
-          march += "a";
-        if (f)
-          march += "f";
-        if (d)
-          march += "d";
-      }
-      if (c)
-        march += "c";
-      if (!g)
-        march += "_zicsr_zifencei";
-      args.push_back("-march=" + march);
+    if (m && a && f && d) {
+      march += "g";
+      g = true;
+    } else {
+      march += "i";
+      if (m)
+        march += "m";
+      if (a)
+        march += "a";
+      if (f)
+        march += "f";
+      if (d)
+        march += "d";
     }
+    if (c)
+      march += "c";
+    if (!g)
+      march += "_zicsr_zifencei";
+    args.push_back("-march=" + march);
     return;
+  }
+
   default:
     break;
   }
@@ -342,7 +330,7 @@ bool setupMsvcEnvironmentImpl(
   if (!rollback) // check for availability only
     return true;
 
-  if (global.params.verbose)
+  if (global.params.v.verbose)
     message("Prepending to environment variables:");
 
   const auto prependToEnvVar =
@@ -360,7 +348,7 @@ bool setupMsvcEnvironmentImpl(
           head += entry;
         }
 
-        if (global.params.verbose)
+        if (global.params.v.verbose)
           message("  %s += %.*s", key, (int)head.size(), head.data());
 
         llvm::SmallVector<wchar_t, 1024> wvalue;
@@ -384,7 +372,7 @@ bool setupMsvcEnvironmentImpl(
   prependToEnvVar("LIB", L"LIB", libPaths);
   prependToEnvVar("PATH", L"PATH", binPaths);
 
-  if (global.params.verbose) {
+  if (global.params.v.verbose) {
     const auto end = std::chrono::steady_clock::now();
     message("MSVC setup took %lld microseconds",
             std::chrono::duration_cast<std::chrono::microseconds>(end - begin)

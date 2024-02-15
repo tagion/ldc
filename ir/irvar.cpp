@@ -114,7 +114,7 @@ void IrGlobal::declare() {
   // Set the alignment (it is important not to use type->alignsize because
   // VarDeclarations can have an align() attribute independent of the type
   // as well).
-  gvar->setAlignment(LLMaybeAlign(DtoAlignment(V)));
+  gvar->setAlignment(llvm::MaybeAlign(DtoAlignment(V)));
 
   applyVarDeclUDAs(V, gvar);
 
@@ -128,7 +128,7 @@ void IrGlobal::define() {
   Logger::println("Defining global: %s", V->toChars());
   LOG_SCOPE
 
-  if (global.params.vtls && V->isThreadlocal() &&
+  if (global.params.v.tls && V->isThreadlocal() &&
       !(V->storage_class & STCtemp)) {
     message("%s: `%s` is thread local", V->loc.toChars(), V->toChars());
   }

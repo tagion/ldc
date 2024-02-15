@@ -155,8 +155,11 @@ Where:\n\
   -conf=<filename>  use config file at filename\n\
   -cov              do code coverage analysis\n\
   -cov=ctfe         include code executed during CTFE in coverage report\n\
-  -cov=<nnn>        require at least nnn%% code coverage\n\
-  -D                generate documentation\n\
+  -cov=<nnn>        require at least nnn%% code coverage\n"
+#if 0
+"  -cpp=<filename>   use filename as the name of the C preprocessor to use for ImportC files\n"
+#endif
+"  -D                generate documentation\n\
   -Dd<directory>    write documentation file to directory\n\
   -Df<filename>     write documentation file to filename\n\
   -d                silently allow deprecated features and symbols\n\
@@ -170,13 +173,16 @@ Where:\n\
                     set default library to name\n\
   -deps             print module dependencies (imports/file/version/debug/lib)\n\
   -deps=<filename>  write module dependencies to filename (only imports)\n\
+  -dllimport=<value>\n\
+                    Windows only: select symbols to dllimport (none/defaultLibsOnly/all)\n\
   -extern-std=<standard>\n\
                     set C++ name mangling compatibility with <standard>\n"
 #if 0
 "  -extern-std=[h|help|?]\n\
                     list all supported standards\n"
 #endif
-"  -fPIC             generate position independent code\n"
+"  -fIBT             generate Indirect Branch Tracking code\n\
+  -fPIC             generate position independent code\n"
 #if 0
 "  -fPIE             generate position independent executables\n"
 #endif
@@ -200,7 +206,7 @@ Where:\n\
   --help            print help and exit\n\
   -I=<directory>    look for imports also in directory\n\
   -i[=<pattern>]    include imported modules in the compilation\n\
-  -ignore           ignore unsupported pragmas\n\
+  -ignore           deprecated flag, unsupported pragmas are always ignored now\n\
   -inline           do function inlining\n\
   -J=<directory>    look for string imports also in directory\n\
   -L=<linkerflag>   pass linkerflag to link\n\
@@ -226,6 +232,7 @@ Where:\n\
   -mv=<package.module>=<filespec>\n\
                     use <filespec> as source file for <package.module>\n\
   -noboundscheck    no array bounds checking (deprecated, use -boundscheck=off)\n\
+  -nothrow          assume no Exceptions will be thrown\n\
   -O                optimize\n\
   -o-               do not write object file\n\
   -od=<directory>   write object & library files to directory\n\
@@ -243,7 +250,7 @@ Where:\n\
 #if 0
 "  -profile=gc       profile runtime allocations\n"
 #endif
-"  -release          compile release version\n\
+"  -release          contracts and asserts are not emitted, and bounds checking is performed only in @safe functions\n\
   -revert=<name>    revert language change identified by 'name'\n\
   -revert=[h|help|?]\n\
                     list all revertable language changes\n\
@@ -270,6 +277,8 @@ Where:\n\
   -version=<level>  compile in version code >= level\n\
   -version=<ident>  compile in version code identified by ident\n\
   -vgc              list all gc allocations including hidden ones\n\
+  -visibility=<value>\n\
+                    default visibility of symbols (default/hidden/public)\n\
   -vtemplates=[list-instances]\n\
                     list statistics on template instantiations\n\
   -vtls             list all variables going into thread local storage\n\
@@ -488,8 +497,15 @@ void translateArgs(const llvm::SmallVectorImpl<const char *> &ldmdArgs,
        * -cov
        * -shared
        */
+      else if (startsWith(p + 1, "visibility=")) {
+        ldcArgs.push_back(concat("-fvisibility=", p + 12));
+      }
+      /* -dllimport
+       */
       else if (strcmp(p + 1, "dylib") == 0) {
         ldcArgs.push_back("-shared");
+      } else if (strcmp(p + 1, "fIBT") == 0) {
+        ldcArgs.push_back("-fcf-protection=branch");
       } else if (strcmp(p + 1, "fPIC") == 0) {
         if (!pic) {
           ldcArgs.push_back("-relocation-model=pic");
@@ -512,11 +528,7 @@ void translateArgs(const llvm::SmallVectorImpl<const char *> &ldmdArgs,
       } else if (strcmp(p + 1, "gf") == 0) {
         ldcArgs.push_back("-g");
       } else if (strcmp(p + 1, "gs") == 0) {
-#if LDC_LLVM_VER >= 1100
         ldcArgs.push_back("-frame-pointer=all");
-#else
-        ldcArgs.push_back("-disable-fp-elim");
-#endif
       } else if (strcmp(p + 1, "gx") == 0) {
         goto Lnot_in_ldc;
       } else if (strcmp(p + 1, "gt") == 0) {
@@ -649,7 +661,11 @@ void translateArgs(const llvm::SmallVectorImpl<const char *> &ldmdArgs,
         ldcArgs.push_back("-boundscheck=off");
       }
       /* -boundscheck
-       * -unittest
+       */
+      else if (strcmp(p + 1, "nothrow") == 0) {
+        ldcArgs.push_back("-fno-exceptions");
+      }
+      /* -unittest
        * -I
        * -J
        */

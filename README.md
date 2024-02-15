@@ -3,12 +3,10 @@ LDC – the LLVM-based D Compiler
 
 [![Latest release](https://img.shields.io/github/v/release/ldc-developers/ldc?include_prereleases&label=latest)][8]
 [![Latest stable release](https://img.shields.io/github/v/release/ldc-developers/ldc?label=stable)][0]
-[![Build status](https://img.shields.io/bitrise/1b36e52cf09e5308/master?label=Bitrise&logo=Bitrise&token=CSkvmRcSUiweaURFUJDMYw)][2]
 [![Build status](https://img.shields.io/circleci/project/github/ldc-developers/ldc/master?logo=CircleCI&label=CircleCI)][3]
 [![Build status](https://img.shields.io/cirrus/github/ldc-developers/ldc/master?label=Cirrus%20CI&logo=Cirrus%20CI)][4]
 [![Build status](https://img.shields.io/github/actions/workflow/status/ldc-developers/ldc/main.yml?branch=master&label=GitHub%20Actions%20%28main%29&logo=github)][7]
 [![Build status](https://img.shields.io/github/actions/workflow/status/ldc-developers/ldc/supported_llvm_versions.yml?branch=master&label=GitHub%20Actions%20%28LLVM%29&logo=github)][7]
-[![Bountysource](https://www.bountysource.com/badge/tracker?tracker_id=283332)][6]
 
 The LDC project provides a portable D programming language compiler
 with modern optimization and code generation capabilities.
@@ -77,9 +75,8 @@ libraries is available on the project wiki for
 [Windows](http://wiki.dlang.org/Building_and_hacking_LDC_on_Windows_using_MSVC).
 
 If you have a working C++/D build environment, CMake, and a recent LLVM
-version (≥ 6.0) available, there should be no big surprises. Do not
-forget to make sure all the submodules (druntime, phobos, dmd-testsuite)
-are up to date:
+version (≥ 11) available, there should be no big surprises. Do not
+forget to make sure the Phobos submodule is up to date:
 
     $ cd ldc
     $ git submodule update --init
@@ -114,9 +111,7 @@ Feedback of any kind is very much appreciated!
 
 
 [0]: https://github.com/ldc-developers/ldc/releases/latest
-[2]: https://app.bitrise.io/app/1b36e52cf09e5308
 [3]: https://circleci.com/gh/ldc-developers/ldc/tree/master
 [4]: https://cirrus-ci.com/github/ldc-developers/ldc/master
-[6]: https://www.bountysource.com/teams/ldc-developers/issues
 [7]: https://github.com/ldc-developers/ldc/actions?query=branch%3Amaster
 [8]: https://github.com/ldc-developers/ldc/releases

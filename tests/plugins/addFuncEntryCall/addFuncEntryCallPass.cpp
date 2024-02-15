@@ -10,9 +10,12 @@
 #include "llvm/Pass.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
+
+#if LLVM_VERSION < 1500 // legacy pass manager
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
+#endif
 
 using namespace llvm;
 
@@ -37,11 +40,7 @@ bool FuncEntryCallPass::doInitialization(Module &M) {
   // Add fwd declaration of the `void __test_funcentrycall(void)` function.
   auto functionType = FunctionType::get(Type::getVoidTy(M.getContext()), false);
   funcToCallUponEntry =
-      M.getOrInsertFunction("__test_funcentrycall", functionType)
-#if LLVM_VERSION >= 900
-          .getCallee()
-#endif
-      ;
+      M.getOrInsertFunction("__test_funcentrycall", functionType).getCallee();
   return true;
 }
 
@@ -50,13 +49,12 @@ bool FuncEntryCallPass::runOnFunction(Function &F) {
   // (this includes e.g. `ldc.register_dso`!)
   llvm::BasicBlock &block = F.getEntryBlock();
   IRBuilder<> builder(&block, block.begin());
-#if LLVM_VERSION >= 1100
   builder.CreateCall(FunctionCallee(cast<Function>(funcToCallUponEntry)));
-#else
-  builder.CreateCall(funcToCallUponEntry);
-#endif
   return true;
 }
+
+
+#if LLVM_VERSION < 1500 // legacy pass manager
 
 static void addFuncEntryCallPass(const PassManagerBuilder &,
                                  legacy::PassManagerBase &PM) {
@@ -67,10 +65,10 @@ static RegisterStandardPasses
     RegisterFuncEntryCallPass0(PassManagerBuilder::EP_EnabledOnOptLevel0,
                                addFuncEntryCallPass);
 
+#endif
 
 
-#if LLVM_VERSION >= 1400
-// Implementation of plugin for the new passmanager
+#if LLVM_VERSION >= 1400 // new pass manager
 
 #include "llvm/IR/PassManager.h"
 #include "llvm/Passes/PassBuilder.h"
@@ -114,5 +112,4 @@ llvmGetPassPluginInfo() {
   };
 }
 
-#endif
-
+#endif // LLVM 14+

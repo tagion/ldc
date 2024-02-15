@@ -9,7 +9,14 @@
 
 #pragma once
 
+#if LDC_LLVM_VER < 1700
 #include "llvm/ADT/Optional.h"
+#else
+#include <optional>
+namespace llvm {
+template <typename T> using Optional = std::optional<T>;
+}
+#endif
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Target/TargetOptions.h"
@@ -38,8 +45,6 @@ InitTargetOptionsFromCodeGenFlags(const llvm::Triple &triple);
 
 std::string getCPUStr();
 std::string getFeaturesStr();
-#if LDC_LLVM_VER >= 1000
 void setFunctionAttributes(llvm::StringRef cpu, llvm::StringRef features,
                            llvm::Function &function);
-#endif
 }

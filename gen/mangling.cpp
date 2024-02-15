@@ -70,7 +70,7 @@ std::string hashSymbolName(llvm::StringRef name, Dsymbol *symb) {
   }
 
   // source line number
-  auto lineNo = ldc::to_string(symb->loc.linnum);
+  auto lineNo = ldc::to_string(symb->loc.linnum());
   ret += ldc::to_string(lineNo.size()+1);
   ret += 'L';
   ret += lineNo;
@@ -98,6 +98,9 @@ std::string hashSymbolName(llvm::StringRef name, Dsymbol *symb) {
 
 std::string getIRMangledName(FuncDeclaration *fdecl, LINK link) {
   std::string mangledName = mangleExact(fdecl);
+  if (fdecl->adFlags & 4) { // nounderscore
+    mangledName.insert(0, "\1");
+  }
 
   // Hash the name if necessary
   if (((link == LINK::d) || (link == LINK::default_)) &&
@@ -115,7 +118,7 @@ std::string getIRMangledName(FuncDeclaration *fdecl, LINK link) {
 
 std::string getIRMangledName(VarDeclaration *vd) {
   OutBuffer mangleBuf;
-  mangleToBuffer(vd, &mangleBuf);
+  mangleToBuffer(vd, mangleBuf);
 
   // TODO: is hashing of variable names necessary?
 
@@ -141,7 +144,7 @@ std::string getIRMangledAggregateName(AggregateDeclaration *ad,
   std::string ret = "_D";
 
   OutBuffer mangleBuf;
-  mangleToBuffer(ad, &mangleBuf);
+  mangleToBuffer(ad, mangleBuf);
   llvm::StringRef mangledAggrName = mangleBuf.peekChars();
 
   if (shouldHashAggrName(mangledAggrName)) {
@@ -173,7 +176,7 @@ std::string getIRMangledClassInfoSymbolName(AggregateDeclaration *aggrdecl) {
 std::string getIRMangledInterfaceInfosSymbolName(ClassDeclaration *cd) {
   OutBuffer mangledName;
   mangledName.writestring("_D");
-  mangleToBuffer(cd, &mangledName);
+  mangleToBuffer(cd, mangledName);
   mangledName.writestring("16__interfaceInfosZ");
   return getIRMangledVarName(mangledName.peekChars(), LINK::d);
 }
@@ -181,7 +184,7 @@ std::string getIRMangledInterfaceInfosSymbolName(ClassDeclaration *cd) {
 std::string getIRMangledModuleInfoSymbolName(Module *module) {
   OutBuffer mangledName;
   mangledName.writestring("_D");
-  mangleToBuffer(module, &mangledName);
+  mangleToBuffer(module, mangledName);
   mangledName.writestring("12__ModuleInfoZ");
   return getIRMangledVarName(mangledName.peekChars(), LINK::d);
 }

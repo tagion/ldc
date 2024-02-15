@@ -45,7 +45,7 @@ extern(C++) class StrictVisitor(AST) : ParseTimeVisitor!AST
     override void visit(AST.TemplateDeclaration) { assert(0); }
     override void visit(AST.TemplateInstance) { assert(0); }
     override void visit(AST.Nspace) { assert(0); }
-    override void visit(AST.CompileDeclaration) { assert(0); }
+    override void visit(AST.MixinDeclaration) { assert(0); }
     override void visit(AST.UserAttributeDeclaration) { assert(0); }
     override void visit(AST.LinkDeclaration) { assert(0); }
     override void visit(AST.AnonDeclaration) { assert(0); }
@@ -71,7 +71,7 @@ extern(C++) class StrictVisitor(AST) : ParseTimeVisitor!AST
     override void visit(AST.ReturnStatement) { assert(0); }
     override void visit(AST.LabelStatement) { assert(0); }
     override void visit(AST.StaticAssertStatement) { assert(0); }
-    override void visit(AST.CompileStatement) { assert(0); }
+    override void visit(AST.MixinStatement) { assert(0); }
     override void visit(AST.WhileStatement) { assert(0); }
     override void visit(AST.ForStatement) { assert(0); }
     override void visit(AST.DoStatement) { assert(0); }
@@ -234,5 +234,6 @@ extern(C++) class StrictVisitor(AST) : ParseTimeVisitor!AST
     override void visit(AST.StructInitializer) { assert(0); }
     override void visit(AST.ArrayInitializer) { assert(0); }
     override void visit(AST.VoidInitializer) { assert(0); }
+    override void visit(AST.DefaultInitializer) { assert(0); }
     override void visit(AST.CInitializer) { assert(0); }
 }
