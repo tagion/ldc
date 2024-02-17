@@ -1,9 +1,11 @@
 module core.sys.wasi.sys.types;
 
-version (WebAssembly) {
-//  version = WASI;
+version(WASI) {
+    pragma(msg, "WASI defined in ", __MODULE__);
 }
-
+else {
+    pragma(msg, "WASI not defined in ", __MODULE__ ~ "!!!!!");
+}
 version (WASI):
 
 private import core.stdc.stdint;

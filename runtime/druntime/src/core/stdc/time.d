@@ -30,11 +30,16 @@ version (Posix)
 else version (Windows)
     public import core.sys.windows.stdc.time;
 else version (WASI)
+{
     public import core.sys.wasi.stdc.time;
+    import core.sys.wasi.sys.types : time_t;
+    pragma(msg, "time_t ", time_t);
+}
 else
     static assert(0, "unsupported system");
 
 import core.stdc.config;
+    import core.sys.wasi.sys.types : ssize_t;
 
 extern (C):
 @trusted: // There are only a few functions here that use unsafe C strings.
