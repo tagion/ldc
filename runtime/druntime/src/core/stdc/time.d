@@ -15,10 +15,22 @@
 
 module core.stdc.time;
 
+version(WASI) {
+    pragma(msg, "WASI ", __MODULE__);
+    version(Posix)
+        pragma(msg, "Posix on");
+else
+        pragma(msg, "Posix off");
+}
+version(WebAssembly) {
+    pragma(msg, "WebAssembly");
+}
 version (Posix)
     public import core.sys.posix.stdc.time;
 else version (Windows)
     public import core.sys.windows.stdc.time;
+else version (WASI)
+    public import core.sys.wasi.stdc.time;
 else
     static assert(0, "unsupported system");
 

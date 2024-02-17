@@ -129,7 +129,10 @@ else version (Posix)
         import core.sys.darwin.pthread : pthread_mach_thread_np;
     }
 }
-
+else version (WASI)
+{
+    import core.sys.posix.stdlib; // for malloc, valloc, free, atexit
+}
 version (Solaris)
 {
     import core.sys.solaris.sys.priocntl;
@@ -141,6 +144,8 @@ version (GNU)
 {
     import gcc.builtins;
 }
+
+
 
 /**
  * Hook for whatever EH implementation is used to save/restore some data
@@ -736,7 +741,10 @@ class Thread : ThreadBase
             }
             else
             {
-                static assert(0, "Your code here.");
+                version (WASI)
+                    assert(0, __FUNCTION__~" is not implemented for wasi");
+                else
+                    static assert(0, "Your code here.");
             }
             return result;
         }
@@ -817,7 +825,12 @@ class Thread : ThreadBase
             }
             return param.sched_priority;
         }
+        else version (WASI)
+        {
+            assert(0, __FUNCTION__~" is not implemented for wasi");
+        }
     }
+
 
 
     /**
@@ -954,6 +967,10 @@ class Thread : ThreadBase
         else version (Posix)
         {
             return atomicLoad(m_isRunning);
+        }
+        else version (WASI)
+        {
+           assert(0, __FUNCTION__~" is not implemented for wasi");
         }
     }
 
@@ -1618,12 +1635,21 @@ in (fn)
         }
         else
         {
-            static assert(false, "Architecture not supported.");
+            version (WASI) {
+                import core.sys.wasi.missing;
+                mixin WASIError;
+                assert(0, wasi_error);
+            }
+            else
+                static assert(false, "Architecture not supported.");
         }
     }
     else
     {
-        static assert(false, "Architecture not supported.");
+       version (WASI)
+           assert(0, __FUNCTION__~" is not implemented for wasi");
+       else
+           static assert(false, "Architecture not supported.");
     }
 
     fn(sp);
@@ -1808,6 +1834,10 @@ package extern(D) void* getStackBottom() nothrow @nogc
 
         thr_stksegment(&stk);
         return stk.ss_sp;
+    }
+    else version (WASI)
+    {
+        assert(0, __FUNCTION__~" is not implemented for wasi");
     }
     else
         static assert(false, "Platform not supported.");
@@ -2620,6 +2650,10 @@ else version (Posix)
 
         }
     }
+}
+else version (WASI)
+{
+    /// Set to nothing for now
 }
 else
 {

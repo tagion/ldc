@@ -24,7 +24,11 @@ version (Posix)
 
     alias ThreadID = pthread_t;
 }
-
+else
+version (WASI)
+{
+    alias ThreadID = uint;
+}
 struct ll_ThreadData
 {
     ThreadID tid;

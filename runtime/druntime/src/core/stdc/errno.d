@@ -153,8 +153,12 @@ else version (Haiku)
         alias errno = _errnop;
     }
 }
+else version (WASI) {
+    extern (C) ref int errno();
+}
 else
 {
+    pragma(msg, "WASI getErrno");
     ///
     extern(C) pragma(mangle, "getErrno") @property int errno();
     ///

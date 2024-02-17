@@ -40,6 +40,13 @@ else version (Posix)
     import core.sys.posix.pthread;
     import core.sys.posix.time;
 }
+else version (WASI)
+{
+    import core.sync.config;
+    import core.stdc.errno;
+    import core.sys.posix.pthread;
+    import core.sys.wasi.time;
+}
 else
 {
     static assert(false, "Platform not supported");
@@ -309,6 +316,10 @@ class Condition
             if ( rc == ETIMEDOUT )
                 return false;
             throw staticError!AssertError("Unable to wait for condition", __FILE__, __LINE__);
+        }
+        else version (WASI)
+        {
+            return false;
         }
     }
 
@@ -610,6 +621,11 @@ private:
     {
         Mutex               m_assocMutex;
         pthread_cond_t      m_hndl;
+    }
+    else version (WASI)
+    {
+        Mutex               m_assocMutex;
+        //pthread_cond_t      m_hndl;
     }
 }
 

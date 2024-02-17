@@ -24,6 +24,12 @@ else version (Posix)
     import core.sys.posix.sys.types;
     import core.sys.posix.time;
 }
+else version (WASI)
+{
+    import core.sys.posix.pthread;
+    import core.sys.wasi.sys.types;
+    import core.sys.wasi.time;
+}
 else
 {
     static assert(false, "Platform not supported");
@@ -222,6 +228,10 @@ nothrow @nogc:
         {
             return wait(Duration.max);
         }
+        else version (WASI)
+        {
+            return false;
+        }
     }
 
     /**
@@ -282,6 +292,10 @@ nothrow @nogc:
             pthread_mutex_unlock(&m_mutex);
 
             return result == 0;
+        }
+        else version (WASI)
+        {
+            return false;
         }
     }
 

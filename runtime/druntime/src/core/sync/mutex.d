@@ -28,6 +28,10 @@ else version (Posix)
 {
     import core.sys.posix.pthread;
 }
+else version (WASI)
+{  /// Set to posix for now
+    import core.sys.posix.pthread;
+}
 else
 {
     static assert(false, "Platform not supported");
@@ -267,6 +271,10 @@ class Mutex :
         else version (Posix)
         {
             return pthread_mutex_trylock(&m_hndl) == 0;
+        }
+        else version (WASI)
+        {
+            return false;
         }
     }
 

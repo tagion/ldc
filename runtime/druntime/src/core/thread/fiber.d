@@ -352,7 +352,6 @@ private
         // NOTE: The data pushed and popped in this routine must match the
         //       default stack created by Fiber.initStack or the initial
         //       switch into a new context will fail.
-
         version (AsmX86_Windows)
         {
             asm pure nothrow @nogc
@@ -538,7 +537,12 @@ private
                           *(cast(ucontext_t**)  newp) );
         }
         else
-            static assert(0, "Not implemented");
+        {
+            version (WASI)
+                assert(0, __FUNCTION__~" is not implemented for wasi");
+            else
+                static assert(0, "Not implemented");
+        }
     }
 }
 
@@ -1914,7 +1918,12 @@ private:
             push( cast(size_t) &m_utxt );
         }
         else
-            static assert(0, "Not implemented");
+        {
+            version (WASI)
+                assert(0, __FUNCTION__~" is not implemented for wasi");
+            else
+                static assert(0, "Not implemented");
+        }
     }
 
 

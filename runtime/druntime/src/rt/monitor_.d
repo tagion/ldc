@@ -215,6 +215,30 @@ else version (Posix)
         pthread_mutex_unlock(mtx) && assert(0);
     }
 }
+else version (WASI)
+{
+    alias Mutex = int; /// Just an int for now
+    import core.sys.wasi.missing;
+@nogc:
+    void initMutex(Mutex* mtx) {
+        mixin WASIError;
+        assert(0, wasi_error);
+    }
+
+    void destroyMutex(Mutex* mtx) {
+        mixin WASIError;
+        assert(0, wasi_error);
+    }
+    void lockMutex(Mutex* mtx) {
+        mixin WASIError;
+        assert(0, wasi_error);
+    }
+
+    void unlockMutex(Mutex* mtx) {
+        mixin WASIError;
+        assert(0, wasi_error);
+    }
+}
 else
 {
     static assert(0, "Unsupported platform");

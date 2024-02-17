@@ -42,7 +42,7 @@ else version (Darwin)
     import core.sys.posix.time;
     import core.sys.darwin.mach.semaphore;
 }
-else version (Posix)
+else version (WASI)
 {
     import core.sync.config;
     import core.stdc.errno;
@@ -269,6 +269,10 @@ class Semaphore
                     throw new SyncError( "Unable to wait for semaphore" );
             }
         }
+        else version (WASI)
+        {
+            return false;
+        }
     }
 
 
@@ -341,6 +345,10 @@ class Semaphore
                     throw new SyncError( "Unable to wait for semaphore" );
             }
         }
+        else version (WASI)
+        {
+            return false;
+        }
     }
 
 
@@ -352,7 +360,8 @@ protected:
     else version (Darwin)    alias Handle = semaphore_t;
     /// ditto
     else version (Posix)     alias Handle = sem_t;
-
+    /// WASI just a int for now
+    else version (WASI)      alias Handle = int;
     /// Handle to the system-specific semaphore.
     Handle m_hndl;
 }

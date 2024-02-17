@@ -330,6 +330,17 @@ else version (Solaris) enum ClockType
     second = 6,
     threadCPUTime = 7,
 }
+else version (WASI) enum ClockType
+{ // The ClockType values is set to the same as Linux of now
+    normal = 0,
+    bootTime = 1,
+    coarse = 2,
+    precise = 3,
+    processCPUTime = 4,
+    raw = 5,
+    second = 6,
+    threadCPUTime = 7,
+}
 else
 {
     // It needs to be decided (and implemented in an appropriate version branch
@@ -343,8 +354,14 @@ else
 version (CoreDdoc)
     private int _posixClock(ClockType clockType) { return 0; }
 else
+version (WASI)
+{ // Simple dummy function for WASI
+    private ClockType _posixClock(ClockType clockType) { return ClockType.init; }
+}
+else
 version (Posix)
 {
+    pragma(msg, "WASI Posix ");
     private auto _posixClock(ClockType clockType)
     {
         version (linux)
@@ -2124,6 +2141,10 @@ struct MonoTimeImpl(ClockType clockType)
     {
         enum clockArg = _posixClock(clockType);
     }
+    else version (WASI)
+    { // Set to the same function as Linux for now
+        enum clockArg = _posixClock(clockType);
+    }
     else
         static assert(0, "Unsupported platform");
 
@@ -2188,6 +2209,9 @@ struct MonoTimeImpl(ClockType clockType)
             return MonoTimeImpl(convClockFreq(ts.tv_sec * 1_000_000_000L + ts.tv_nsec,
                                               1_000_000_000L,
                                               ticksPerSecond));
+        }
+        else version (WASI) {
+            assert(0, __FUNCTION__~" is not implemented for wasi");
         }
     }
 
@@ -3449,6 +3473,10 @@ deprecated:
                 return TickDuration(tv.tv_sec * TickDuration.ticksPerSec +
                                     tv.tv_usec * TickDuration.ticksPerSec / 1000 / 1000);
             }
+        }
+        else version (WASI)
+        {
+            assert(0, __FUNCTION__~" is not implemented for wasi");
         }
     }
 

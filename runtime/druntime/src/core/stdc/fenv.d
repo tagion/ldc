@@ -187,7 +187,7 @@ else version (CRuntime_DigitalMars)
         ushort    status;
         ushort    control;
         ushort    round;
-        ushort[2] reserved;
+        ushort[2] reservZed;
     }
     alias fexcept_t = int;
 }
@@ -514,6 +514,10 @@ else version (CRuntime_UClibc)
         static assert(false, "Architecture not supported.");
     }
 }
+else version (WebAssembly) {
+    alias fenv_t = uint;
+    alias fexcept_t = uint;
+}
 else
 {
     static assert( false, "Unsupported platform" );
@@ -817,6 +821,28 @@ else
             FE_DOWNWARD     = 0x300, ///
         }
     }
+    else version (WASI)
+    {  /// Just some values for now
+        // Define bits representing exceptions in the Flags field in FCSR{0,2}.
+        enum
+        {
+            FE_INEXACT      = 0x010000, ///
+            FE_UNDERFLOW    = 0x020000, ///
+            FE_OVERFLOW     = 0x040000, ///
+            FE_DIVBYZERO    = 0x080000, ///
+            FE_INVALID      = 0x100000, ///
+            FE_ALL_EXCEPT   = 0x1f0000, ///
+        }
+
+        // Define bits representing rounding modes in the RM field in FCSR{0,3}.
+        enum
+        {
+            FE_TONEAREST    = 0x000, ///
+            FE_TOWARDZERO   = 0x100, ///
+            FE_UPWARD       = 0x200, ///
+            FE_DOWNWARD     = 0x300, ///
+        }
+    }
     else
     {
         static assert(0, "Unimplemented architecture");
@@ -890,6 +916,11 @@ else version (CRuntime_Musl)
 }
 else version (CRuntime_UClibc)
 {
+    ///
+    enum FE_DFL_ENV = cast(fenv_t*)(-1);
+}
+else version (WASI)
+{ /// Just some values for now
     ///
     enum FE_DFL_ENV = cast(fenv_t*)(-1);
 }

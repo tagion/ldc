@@ -320,6 +320,18 @@ extern (C) int _d_run_main(int argc, char** argv, MainFunc mainFunc)
             totalArgsLength += arg.length;
         }
     }
+    else version (WASI)
+    {
+        // Allocate args[] on the stack
+        char[][] args = (cast(char[]*) alloca(argc * (char[]).sizeof))[0 .. argc];
+
+        size_t totalArgsLength = 0;
+        foreach (i, ref arg; args)
+        {
+            arg = argv[i][0 .. strlen(argv[i])];
+            totalArgsLength += arg.length;
+        }
+    }
     else
         static assert(0);
 

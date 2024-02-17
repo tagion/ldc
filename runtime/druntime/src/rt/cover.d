@@ -17,13 +17,18 @@ private
 {
     version (Windows)
     {
-        import core.sys.windows.basetsd /+: HANDLE+/;
-        import core.sys.windows.winbase /+: LOCKFILE_EXCLUSIVE_LOCK, LockFileEx, OVERLAPPED, SetEndOfFile+/;
+        import core.sys.windows.basetsd /+: HANDLE+/ ;
+        import core.sys.windows.winbase /+: LOCKFILE_EXCLUSIVE_LOCK, LockFileEx, OVERLAPPED, SetEndOfFile+/ ;
     }
     else version (Posix)
     {
         import core.sys.posix.fcntl;
         import core.sys.posix.unistd;
+    }
+    else version (WASI)
+    {
+        import core.sys.wasi.fcntl;
+        import core.sys.wasi.unistd;
     }
     import core.stdc.config : c_long;
     import core.stdc.stdio;
@@ -32,31 +37,31 @@ private
 
     struct BitArray
     {
-        size_t  len;
+        size_t len;
         size_t* ptr;
 
-        bool opIndex( size_t i )
+        bool opIndex(size_t i)
         in
         {
-            assert( i < len );
+            assert(i < len);
         }
         do
         {
             static if (size_t.sizeof == 8)
                 return ((ptr[i >> 6] & (1L << (i & 63)))) != 0;
             else static if (size_t.sizeof == 4)
-                return ((ptr[i >> 5] & (1  << (i & 31)))) != 0;
+                return ((ptr[i >> 5] & (1 << (i & 31)))) != 0;
             else
                 static assert(0);
         }
     }
 
-    struct Cover                // one of these for each module being analyzed
+    struct Cover // one of these for each module being analyzed
     {
-        string      filename;
-        BitArray    valid;      // bit array of which source lines are executable code lines
-        uint[]      data;       // array of line execution counts
-        ubyte       minPercent; // minimum percentage coverage required
+        string filename;
+        BitArray valid; // bit array of which source lines are executable code lines
+        uint[] data; // array of line execution counts
+        ubyte minPercent; // minimum percentage coverage required
     }
 
     __gshared
@@ -67,15 +72,16 @@ private
 
     struct Config
     {
-        string  srcpath;
-        string  dstpath;
-        bool    merge;
+        string srcpath;
+        string dstpath;
+        bool merge;
 
     @nogc nothrow:
 
         bool initialize()
         {
             import core.internal.parseoptions : initConfigOptions;
+
             return initConfigOptions(this, this.errorName);
         }
 
@@ -91,10 +97,12 @@ private
             printf(s.ptr, merge);
         }
 
-        string errorName() { return "covopt"; }
+        string errorName()
+        {
+            return "covopt";
+        }
     }
 }
-
 
 /**
  * Set path to where source files are located.
@@ -102,11 +110,10 @@ private
  * Params:
  *  pathname = The new path name.
  */
-extern (C) void dmd_coverSourcePath( string pathname )
+extern (C) void dmd_coverSourcePath(string pathname)
 {
     config.srcpath = pathname;
 }
-
 
 /**
  * Set path to where listing files are to be written.
@@ -114,11 +121,10 @@ extern (C) void dmd_coverSourcePath( string pathname )
  * Params:
  *  pathname = The new path name.
  */
-extern (C) void dmd_coverDestPath( string pathname )
+extern (C) void dmd_coverDestPath(string pathname)
 {
     config.dstpath = pathname;
 }
-
 
 /**
  * Set merge mode.
@@ -127,11 +133,10 @@ extern (C) void dmd_coverDestPath( string pathname )
  *      flag = true means new data is summed with existing data in the listing
  *         file; false means a new listing file is always created.
  */
-extern (C) void dmd_coverSetMerge( bool flag )
+extern (C) void dmd_coverSetMerge(bool flag)
 {
     config.merge = flag;
 }
-
 
 /**
  * The coverage callback.
@@ -148,17 +153,17 @@ extern (C) void _d_cover_register2(string filename, size_t[] valid, uint[] data,
 
     Cover c;
 
-    c.filename  = filename;
+    c.filename = filename;
     c.valid.ptr = valid.ptr;
     c.valid.len = valid.length;
-    c.data      = data;
+    c.data = data;
     c.minPercent = minPercent;
-    gdata      ~= c;
+    gdata ~= c;
 }
 
 /* Kept for the moment for backwards compatibility.
  */
-extern (C) void _d_cover_register( string filename, size_t[] valid, uint[] data )
+extern (C) void _d_cover_register(string filename, size_t[] valid, uint[] data)
 {
     _d_cover_register2(filename, valid, data, 0);
 }
@@ -195,11 +200,13 @@ bool lstEquals(char[][] sourceLines, char[][] lstLines)
     {
         auto content = parseContent(lstLines[i]);
         // length mismatch
-        if (line.length != content.length) return false;
+        if (line.length != content.length)
+            return false;
 
         // char content mismatch
         foreach (j, c; content)
-            if (line[j] != c) return false;
+            if (line[j] != c)
+                return false;
     }
 
     return true;
@@ -207,9 +214,13 @@ bool lstEquals(char[][] sourceLines, char[][] lstLines)
 
 unittest
 {
-    char[][] src = cast(char[][])[ "12345", " | 12345, asasd", "|", ".;" ];
-    char[][] lst = cast(char[][])[ "       |12345", "       | | 12345, asasd", "      1||", "0000000|.;", "" ];
-    char[][] badLst = cast(char[][])[ "       |12344", "       | | 12345, asasd", "      1||", "0000000|.;", "" ];
+    char[][] src = cast(char[][])["12345", " | 12345, asasd", "|", ".;"];
+    char[][] lst = cast(char[][])[
+        "       |12345", "       | | 12345, asasd", "      1||", "0000000|.;", ""
+    ];
+    char[][] badLst = cast(char[][])[
+        "       |12344", "       | | 12345, asasd", "      1||", "0000000|.;", ""
+    ];
     assert(lstEquals(src, lst));
     assert(!lstEquals(src, []));
     assert(!lstEquals(src, badLst));
@@ -222,7 +233,8 @@ shared static this()
 
 shared static ~this()
 {
-    if (!gdata.length) return;
+    if (!gdata.length)
+        return;
 
     const NUMLINES = 16384 - 1;
     const NUMCHARS = 16384 * 16 - 1;
@@ -238,7 +250,8 @@ shared static ~this()
         if (flst is null)
             continue;
         lockFile(fileno(flst)); // gets unlocked by fclose
-        scope(exit) fclose(flst);
+        scope (exit)
+            fclose(flst);
 
         if (!readFile(appendFN(config.srcpath, c.filename), buf))
             continue;
@@ -287,34 +300,34 @@ shared static ~this()
                 if (c.valid[i])
                 {
                     ++nno;
-                    fprintf(flst, "%0*u|%.*s\n", maxDigits, 0, cast(int)line.length, line.ptr);
+                    fprintf(flst, "%0*u|%.*s\n", maxDigits, 0, cast(int) line.length, line.ptr);
                 }
                 else
                 {
-                    fprintf(flst, "%*s|%.*s\n", maxDigits, " ".ptr, cast(int)line.length, line.ptr);
+                    fprintf(flst, "%*s|%.*s\n", maxDigits, " ".ptr, cast(int) line.length, line.ptr);
                 }
             }
             else
             {
                 ++nyes;
-                fprintf(flst, "%*u|%.*s\n", maxDigits, n, cast(int)line.length, line.ptr);
+                fprintf(flst, "%*u|%.*s\n", maxDigits, n, cast(int) line.length, line.ptr);
             }
         }
 
         if (nyes + nno) // no divide by 0 bugs
         {
-            uint percent = ( nyes * 100 ) / ( nyes + nno );
-            fprintf(flst, "%.*s is %d%% covered\n", cast(int)c.filename.length, c.filename.ptr, percent);
+            uint percent = (nyes * 100) / (nyes + nno);
+            fprintf(flst, "%.*s is %d%% covered\n", cast(int) c.filename.length, c.filename.ptr, percent);
             if (percent < c.minPercent)
             {
                 fprintf(stderr, "Error: %.*s is %d%% covered, less than required %d%%\n",
-                    cast(int)c.filename.length, c.filename.ptr, percent, c.minPercent);
+                    cast(int) c.filename.length, c.filename.ptr, percent, c.minPercent);
                 exit(EXIT_FAILURE);
             }
         }
         else
         {
-            fprintf(flst, "%.*s has no code\n", cast(int)c.filename.length, c.filename.ptr);
+            fprintf(flst, "%.*s has no code\n", cast(int) c.filename.length, c.filename.ptr);
         }
 
         version (Windows)
@@ -327,7 +340,8 @@ shared static ~this()
 uint digits(uint number)
 {
     import core.stdc.math;
-    return number ? cast(uint)floor(log10(number)) + 1 : 1;
+
+    return number ? cast(uint) floor(log10(number)) + 1 : 1;
 }
 
 unittest
@@ -338,6 +352,7 @@ unittest
         assert(digits(num - 1) == dgts - 1);
         assert(digits(num + 1) == dgts);
     }
+
     assert(digits(0) == 1);
     assert(digits(1) == 1);
     testDigits(10, 2);
@@ -346,25 +361,27 @@ unittest
     testDigits(1_000_000_000, 10);
 }
 
-string appendFN( string path, string name )
+string appendFN(string path, string name)
 {
-    if (!path.length) return name;
+    if (!path.length)
+        return name;
 
     version (Windows)
         const char sep = '\\';
     else version (Posix)
         const char sep = '/';
+    else version (WASI)
+        const char sep = '/';
 
     auto dest = path;
 
-    if ( dest.length && dest[$ - 1] != sep )
+    if (dest.length && dest[$ - 1] != sep)
         dest ~= sep;
     dest ~= name;
     return dest;
 }
 
-
-string baseName( string name, string ext = null )
+string baseName(string name, string ext = null)
 {
     string ret;
     foreach (c; name)
@@ -380,41 +397,39 @@ string baseName( string name, string ext = null )
             ret ~= c;
         }
     }
-    return ext.length ? chomp(ret,  ext) : ret;
+    return ext.length ? chomp(ret, ext) : ret;
 }
 
-
-string getExt( string name )
+string getExt(string name)
 {
     auto i = name.length;
 
-    while ( i > 0 )
+    while (i > 0)
     {
-        if ( name[i - 1] == '.' )
+        if (name[i - 1] == '.')
             return name[i .. $];
         --i;
         version (Windows)
         {
-            if ( name[i] == ':' || name[i] == '\\' )
+            if (name[i] == ':' || name[i] == '\\')
                 break;
         }
         else version (Posix)
         {
-            if ( name[i] == '/' )
+            if (name[i] == '/')
                 break;
         }
     }
     return null;
 }
 
-
-string addExt( string name, string ext )
+string addExt(string name, string ext)
 {
-    auto  existing = getExt( name );
+    auto existing = getExt(name);
 
-    if ( existing.length == 0 )
+    if (existing.length == 0)
     {
-        if ( name.length && name[$ - 1] == '.' )
+        if (name.length && name[$ - 1] == '.')
             name ~= ext;
         else
             name = name ~ "." ~ ext;
@@ -426,27 +441,26 @@ string addExt( string name, string ext )
     return name;
 }
 
-
-string chomp( string str, string delim = null )
+string chomp(string str, string delim = null)
 {
-    if ( delim is null )
+    if (delim is null)
     {
         auto len = str.length;
 
-        if ( len )
+        if (len)
         {
             auto c = str[len - 1];
 
-            if ( c == '\r' )
+            if (c == '\r')
                 --len;
-            else if ( c == '\n' && str[--len - 1] == '\r' )
+            else if (c == '\n' && str[--len - 1] == '\r')
                 --len;
         }
         return str[0 .. len];
     }
-    else if ( str.length >= delim.length )
+    else if (str.length >= delim.length)
     {
-        if ( str[$ - delim.length .. $] == delim )
+        if (str[$ - delim.length .. $] == delim)
             return str[0 .. $ - delim.length];
     }
     return str;
@@ -462,10 +476,10 @@ FILE* openOrCreateFile(string name)
     else
         immutable fd = open((name ~ '\0').ptr, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP |
                 S_IROTH | S_IWOTH);
-    version (CRuntime_Microsoft)
-        alias fdopen = _fdopen;
-    version (Posix)
-        import core.sys.posix.stdio;
+    version (CRuntime_Microsoft) alias fdopen = _fdopen;
+    version (Posix) import core.sys.posix.stdio;
+    version (WASI) import core.sys.wasi.stdio;
+
     return fdopen(fd, "r+b");
 }
 
@@ -474,7 +488,7 @@ version (Windows) HANDLE handle(int fd)
     version (CRuntime_DigitalMars)
         return _fdToHandle(fd);
     else
-        return cast(HANDLE)_get_osfhandle(fd);
+        return cast(HANDLE) _get_osfhandle(fd);
 }
 
 void lockFile(int fd)
@@ -483,9 +497,12 @@ void lockFile(int fd)
     {
         import core.sys.bionic.fcntl : LOCK_EX;
         import core.sys.bionic.unistd : flock;
+
         flock(fd, LOCK_EX); // exclusive lock
     }
     else version (Posix)
+        lockf(fd, F_LOCK, 0); // exclusive lock
+    else version (WASI)
         lockf(fd, F_LOCK, 0); // exclusive lock
     else version (Windows)
     {
@@ -519,7 +536,6 @@ bool readFile(FILE* file, ref char[] buf)
 version (Windows) extern (C) nothrow @nogc FILE* _wfopen(scope const wchar* filename, scope const wchar* mode);
 version (Windows) extern (C) int chsize(int fd, c_long size);
 
-
 bool readFile(string name, ref char[] buf)
 {
     import core.internal.utf : toUTF16z;
@@ -528,44 +544,46 @@ bool readFile(string name, ref char[] buf)
         auto file = _wfopen(toUTF16z(name), "rb"w.ptr);
     else
         auto file = fopen((name ~ '\0').ptr, "rb".ptr);
-    if (file is null) return false;
-    scope(exit) fclose(file);
+    if (file is null)
+        return false;
+    scope (exit)
+        fclose(file);
     return readFile(file, buf);
 }
 
-void splitLines( char[] buf, ref char[][] lines )
+void splitLines(char[] buf, ref char[][] lines)
 {
-    size_t  beg = 0,
-            pos = 0;
+    size_t beg = 0,
+    pos = 0;
 
     lines.length = 0;
-    for ( ; pos < buf.length; ++pos )
+    for (; pos < buf.length; ++pos)
     {
         char c = buf[pos];
 
-        switch ( buf[pos] )
+        switch (buf[pos])
         {
         case '\r':
         case '\n':
             lines ~= buf[beg .. pos];
             beg = pos + 1;
-            if ( buf[pos] == '\r' && pos < buf.length - 1 && buf[pos + 1] == '\n' )
+            if (buf[pos] == '\r' && pos < buf.length - 1 && buf[pos + 1] == '\n')
             {
-                ++pos; ++beg;
+                ++pos;
+                ++beg;
             }
             continue;
         default:
             continue;
         }
     }
-    if ( beg != pos )
+    if (beg != pos)
     {
         lines ~= buf[beg .. pos];
     }
 }
 
-
-char[] expandTabs( char[] str, int tabsize = 8 )
+char[] expandTabs(char[] str, int tabsize = 8)
 {
     const dchar LS = '\u2028'; // UTF line separator
     const dchar PS = '\u2029'; // UTF paragraph separator
@@ -575,51 +593,52 @@ char[] expandTabs( char[] str, int tabsize = 8 )
     int column;
     int nspaces;
 
-    foreach ( size_t i, dchar c; str )
+    foreach (size_t i, dchar c; str)
     {
-        switch ( c )
+        switch (c)
         {
-            case '\t':
-                nspaces = tabsize - (column % tabsize);
-                if ( !changes )
-                {
-                    changes = true;
-                    result = null;
-                    result.length = str.length + nspaces - 1;
-                    result.length = i + nspaces;
-                    result[0 .. i] = str[0 .. i];
-                    result[i .. i + nspaces] = ' ';
-                }
+        case '\t':
+            nspaces = tabsize - (column % tabsize);
+            if (!changes)
+            {
+                changes = true;
+                result = null;
+                result.length = str.length + nspaces - 1;
+                result.length = i + nspaces;
+                result[0 .. i] = str[0 .. i];
+                result[i .. i + nspaces] = ' ';
+            }
+            else
+            {
+                auto j = result.length;
+                result.length = j + nspaces;
+                result[j .. j + nspaces] = ' ';
+            }
+            column += nspaces;
+            break;
+
+        case '\r':
+        case '\n':
+        case PS:
+        case LS:
+            column = 0;
+            goto L1;
+
+        default:
+            column++;
+        L1:
+            if (changes)
+            {
+                if (c <= 0x7F)
+                    result ~= cast(char) c;
                 else
-                {   auto j = result.length;
-                    result.length = j + nspaces;
-                    result[j .. j + nspaces] = ' ';
-                }
-                column += nspaces;
-                break;
-
-            case '\r':
-            case '\n':
-            case PS:
-            case LS:
-                column = 0;
-                goto L1;
-
-            default:
-                column++;
-            L1:
-                if (changes)
                 {
-                    if (c <= 0x7F)
-                        result ~= cast(char)c;
-                    else
-                    {
-                        dchar[1] ca = c;
-                        foreach (char ch; ca[])
-                            result ~= ch;
-                    }
+                    dchar[1] ca = c;
+                    foreach (char ch; ca[])
+                        result ~= ch;
                 }
-                break;
+            }
+            break;
         }
     }
     return result;

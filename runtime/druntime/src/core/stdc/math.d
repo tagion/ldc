@@ -4780,3 +4780,70 @@ else
     ///
     pure real    fmal(real x, real y, real z);
 }
+version (WASI)
+{
+    //
+    // these functions are all macros in C
+    //
+
+    //int fpclassify(real-floating x);
+    pure int fpclassify(float x);
+    pure int fpclassify(double x);
+    pure int fpclassify(real x);
+
+    //int isfinite(real-floating x);
+    pure int isfinite(float x);
+    pure int isfinite(double x);
+    pure int isfinite(real x);
+
+    //int isinf(real-floating x);
+    pure int isinf(float x);
+    pure int isinf(double x);
+    pure int isinf(real x);
+
+    //int isnan(real-floating x);
+    //pure int isnan(float x);
+   // pure int isnan(double x);
+    pure int isnan(real x);
+
+    //int isnormal(real-floating x);
+    pure int isnormal(float x);
+    pure int isnormal(double x);
+    pure int isnormal(real x);
+
+    //int signbit(real-floating x);
+    pure int signbit(float x);
+    pure int signbit(double x);
+    pure int signbit(real x);
+
+    //int isgreater(real-floating x, real-floating y);
+    pure int isgreater(float x, float y);
+    pure int isgreater(double x, double y);
+    pure int isgreater(real x, real y);
+
+    //int isgreaterequal(real-floating x, real-floating y);
+    pure int isgreaterequal(float x, float y);
+    pure int isgreaterequal(double x, double y);
+    pure int isgreaterequal(real x, real y);
+
+    //int isless(real-floating x, real-floating y);
+    pure int isless(float x, float y);
+    pure int isless(double x, double y);
+    pure int isless(real x, real y);
+
+    //int islessequal(real-floating x, real-floating y);
+    pure int islessequal(float x, float y);
+    pure int islessequal(double x, double y);
+    pure int islessequal(real x, real y);
+
+    //int islessgreater(real-floating x, real-floating y);
+    pure int islessgreater(float x, float y);
+    pure int islessgreater(double x, double y);
+    pure int islessgreater(real x, real y);
+
+    //int isunordered(real-floating x, real-floating y);
+//    pure int isunordered(float x, float y);
+ //   pure int isunordered(double x, double y);
+  //  pure int isunordered(real x, real y);
+}
+
