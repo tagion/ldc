@@ -14,9 +14,10 @@
  */
 module core.sys.wasi.netdb;
 
+version (WASI):
 import core.sys.wasi.config;
 public import core.stdc.inttypes;         // for uint32_t
-public import core.sys.posix.netinet.in_; // for in_port_t, in_addr_t
+public import core.sys.wasi.netinet.in_; // for in_port_t, in_addr_t
 public import core.sys.wasi.sys.types;   // for ino_t
 public import core.sys.wasi.sys.socket;  // for socklen_t
 
@@ -29,7 +30,6 @@ else version (TVOS)
 else version (WatchOS)
     version = Darwin;
 
-version (WASI):
 extern (C):
 nothrow:
 @nogc:
