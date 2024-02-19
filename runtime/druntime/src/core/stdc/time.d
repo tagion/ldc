@@ -35,7 +35,6 @@ else
     static assert(0, "unsupported system");
 
 import core.stdc.config;
-    import core.sys.wasi.sys.types : ssize_t;
 
 extern (C):
 @trusted: // There are only a few functions here that use unsafe C strings.

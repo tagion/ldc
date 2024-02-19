@@ -42,9 +42,16 @@ else version (Darwin)
     import core.sys.posix.time;
     import core.sys.darwin.mach.semaphore;
 }
-else version (WASI)
+else version (Posix)
 {
     import core.sync.config;
+    import core.stdc.errno;
+    import core.sys.posix.pthread;
+    import core.sys.posix.semaphore;
+}
+else version (WASI)
+{
+    //import core.sync.config;
     import core.stdc.errno;
     import core.sys.posix.pthread;
     import core.sys.posix.semaphore;
