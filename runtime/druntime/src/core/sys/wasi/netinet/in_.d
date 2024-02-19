@@ -64,3 +64,11 @@ enum : uint
     IPV6_UNICAST_HOPS   = 16,
     IPV6_V6ONLY         = 26
 }
+
+enum : uint
+{
+    INADDR_ANY       = 0x00000000,
+    INADDR_BROADCAST = 0xffffffff,
+    INADDR_LOOPBACK  = 0x7F000001,
+    INADDR_NONE      = 0xFFFFFFFF
+}

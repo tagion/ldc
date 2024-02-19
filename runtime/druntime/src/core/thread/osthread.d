@@ -1683,6 +1683,12 @@ else version (Windows)
 {
     alias getpid = core.sys.windows.winbase.GetCurrentProcessId;
 }
+else version (WASI)
+{
+    import core.sys.wasi.unistd;
+
+    alias getpid = core.sys.wasi.unistd.getpid;
+}
 
 extern (C) @nogc nothrow
 {

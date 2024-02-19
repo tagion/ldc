@@ -33,7 +33,7 @@ struct Buffer
 {
     ubyte[] data;
 
-  nothrow:
+nothrow:
 
     this(this) @disable;
 
@@ -100,8 +100,8 @@ nothrow:
                 close(fd);
                 return result;
             }
-            size = cast(size_t)buf.st_size;
-            ubyte* buffer = cast(ubyte*)mem.xmalloc_noscan(size + 4);
+            size = cast(size_t) buf.st_size;
+            ubyte* buffer = cast(ubyte*) mem.xmalloc_noscan(size + 4);
             numread = .read(fd, buffer, size);
             if (numread != size)
             {
@@ -134,18 +134,17 @@ nothrow:
 
             // work around Windows file path length limitation
             // (see documentation for extendedPathThen).
-            HANDLE h = name.extendedPathThen!
-                (p => CreateFileW(p.ptr,
-                                  GENERIC_READ,
-                                  FILE_SHARE_READ,
-                                  null,
-                                  OPEN_EXISTING,
-                                  FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
-                                  null));
+            HANDLE h = name.extendedPathThen!(p => CreateFileW(p.ptr,
+                    GENERIC_READ,
+                    FILE_SHARE_READ,
+                    null,
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+                    null));
             if (h == INVALID_HANDLE_VALUE)
                 return result;
             size = GetFileSize(h, null);
-            ubyte* buffer = cast(ubyte*)mem.xmalloc_noscan(size + 4);
+            ubyte* buffer = cast(ubyte*) mem.xmalloc_noscan(size + 4);
             if (ReadFile(h, buffer, size, &numread, null) != TRUE)
                 goto err2;
             if (numread != size)
@@ -175,6 +174,7 @@ nothrow:
     static bool write(const(char)* name, const void[] data)
     {
         import dmd.common.file : writeFile;
+
         return writeFile(name, data);
     }
 
@@ -189,7 +189,8 @@ nothrow:
     {
         version (Posix)
         {
-            .remove(name);
+
+                .remove(name);
         }
         else version (Windows)
         {
@@ -201,24 +202,25 @@ nothrow:
         }
     }
 
-version (IN_LLVM)
-{
-    extern (C++) static void removeDirectory(const(char)* name)
+    version (IN_LLVM)
     {
-        version (Posix)
+        extern (C++) static void removeDirectory(const(char)* name)
         {
-            .remove(name);
-        }
-        else version (Windows)
-        {
-            name.toDString.extendedPathThen!(p => RemoveDirectoryW(p.ptr));
-        }
-        else
-        {
-            static assert(0);
+            version (Posix)
+            {
+
+                    .remove(name);
+            }
+            else version (Windows)
+            {
+                name.toDString.extendedPathThen!(p => RemoveDirectoryW(p.ptr));
+            }
+            else
+            {
+                static assert(0);
+            }
         }
     }
-}
 
     /***************************************************
      * Update file
@@ -238,18 +240,20 @@ version (IN_LLVM)
     static bool update(const(char)* namez, const void[] data)
     {
         enum log = false;
-        if (log) printf("update %s\n", namez);
+        if (log)
+            printf("update %s\n", namez);
 
         if (data.length != File.size(namez))
-            return write(namez, data);               // write new file
+            return write(namez, data); // write new file
 
-        if (log) printf("same size\n");
+        if (log)
+            printf("same size\n");
 
         /* The file already exists, and is the same size.
          * Read it in, and compare for equality.
          */
         //if (FileMapping!(const ubyte)(namez)[] != data[])
-            return write(namez, data); // contents not same, so write new file
+        return write(namez, data); // contents not same, so write new file
         //if (log) printf("same contents\n");
 
         /* Contents are identical, so set timestamp of existing file to current time
@@ -278,12 +282,15 @@ version (IN_LLVM)
         {
             const nameStr = namez.toDString();
             import core.sys.windows.windows;
+
             WIN32_FILE_ATTRIBUTE_DATA fad = void;
             // Doesn't exist, not a regular file, different size
-            if (nameStr.extendedPathThen!(p => GetFileAttributesExW(p.ptr, GET_FILEEX_INFO_LEVELS.GetFileExInfoStandard, &fad)) != 0)
+            if (nameStr.extendedPathThen!(p => GetFileAttributesExW(p.ptr, GET_FILEEX_INFO_LEVELS
+                    .GetFileExInfoStandard, &fad)) != 0)
                 return (ulong(fad.nFileSizeHigh) << 32UL) | fad.nFileSizeLow;
         }
-        else static assert(0);
+        else
+            static assert(0);
         // Error cases go here.
         return ulong.max;
     }
@@ -299,13 +306,14 @@ private
         alias stat_t_imported = core.sys.posix.sys.stat.stat_t;
         static if (stat_t_imported.st_size.offsetof != 48)
         {
-            extern (C) nothrow @nogc:
+        extern (C) nothrow @nogc:
             struct stat_t
             {
                 ulong[6] __pad1;
                 ulong st_size;
                 ulong[6] __pad2;
             }
+
             version (CRuntime_Glibc)
             {
                 int fstat64(int, stat_t*) @trusted;
