@@ -2177,6 +2177,15 @@ struct MonoTimeImpl(ClockType clockType)
       +/
     static @property MonoTimeImpl currTime() @trusted nothrow @nogc
     {
+        version (WASI) {
+            import core.sys.wasi.missing;
+            import core.stdc.stdio;
+            mixin WASIError;
+            printf("%s\n", &wasi_error[0]);
+            long ticks = 1000;
+            //QueryPerformanceCounter(&ticks);
+            return MonoTimeImpl(ticks);
+        }
         if (ticksPerSecond == 0)
         {
             import core.internal.abort : abort;
@@ -2209,9 +2218,6 @@ struct MonoTimeImpl(ClockType clockType)
             return MonoTimeImpl(convClockFreq(ts.tv_sec * 1_000_000_000L + ts.tv_nsec,
                                               1_000_000_000L,
                                               ticksPerSecond));
-        }
-        else version (WASI) {
-            assert(0, __FUNCTION__~" is not implemented for wasi");
         }
     }
 
@@ -2462,6 +2468,11 @@ assert(before + timeElapsed == after);
       +/
     static @property long ticksPerSecond() pure nothrow @nogc
     {
+        version (WASI)
+        {
+            pragma(msg, "WASI hack ",__FUNCTION__," ",__FILE__,":",__LINE__);
+            return long(1000);
+        }
         return _ticksPerSecond[_clockIdx];
     }
 

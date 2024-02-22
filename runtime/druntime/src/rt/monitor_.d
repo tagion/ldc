@@ -222,21 +222,29 @@ else version (WASI)
 @nogc:
     void initMutex(Mutex* mtx) {
         mixin WASIError;
-        assert(0, wasi_error);
+        import core.stdc.stdio;
+        printf("%s\n", &wasi_error[0]);
+        //assert(0, wasi_error);
     }
 
     void destroyMutex(Mutex* mtx) {
         mixin WASIError;
-        assert(0, wasi_error);
+        import core.stdc.stdio;
+        printf("%s\n", &wasi_error[0]);
+        //assert(0, wasi_error);
     }
     void lockMutex(Mutex* mtx) {
         mixin WASIError;
-        assert(0, wasi_error);
+        import core.stdc.stdio;
+        printf("%s\n", &wasi_error[0]);
+        //assert(0, wasi_error);
     }
 
     void unlockMutex(Mutex* mtx) {
         mixin WASIError;
-        assert(0, wasi_error);
+        import core.stdc.stdio;
+        printf("%s\n", &wasi_error[0]);
+        //assert(0, wasi_error);
     }
 }
 else

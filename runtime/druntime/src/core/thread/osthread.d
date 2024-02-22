@@ -570,6 +570,7 @@ class Thread : ThreadBase
         }
     }
 
+
     /**
      * Waits for this thread to complete.  If the thread terminated as the
      * result of an unhandled exception, this exception will be rethrown.
@@ -970,7 +971,10 @@ class Thread : ThreadBase
         }
         else version (WASI)
         {
-           assert(0, __FUNCTION__~" is not implemented for wasi");
+           import core.stdc.stdio;
+           printf("Multi threads not supported (%s %s)\n", &__FUNCTION__[0],
+                &" is not implemented for wasi)"[0]);
+            return true;
         }
     }
 
