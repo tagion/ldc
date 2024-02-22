@@ -971,9 +971,10 @@ class Thread : ThreadBase
         }
         else version (WASI)
         {
-           import core.stdc.stdio;
-           printf("Multi threads not supported (%s %s)\n", &__FUNCTION__[0],
-                &" is not implemented for wasi)"[0]);
+            import core.sys.wasi.missing;
+            mixin WASIError;
+            import core.stdc.stdio;
+            version (WASI_MISSING) printf("%s\n", &wasi_error[0]);
             return true;
         }
     }

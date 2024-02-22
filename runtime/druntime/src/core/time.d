@@ -2181,7 +2181,7 @@ struct MonoTimeImpl(ClockType clockType)
             import core.sys.wasi.missing;
             import core.stdc.stdio;
             mixin WASIError;
-            printf("%s\n", &wasi_error[0]);
+            version (WASI_MISSING) printf("%s\n", &wasi_error[0]);
             long ticks = 1000;
             //QueryPerformanceCounter(&ticks);
             return MonoTimeImpl(ticks);
