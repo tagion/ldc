@@ -10,10 +10,6 @@
 
 module core.sys.wasi.core;
 
-version (WebAssembly) {
-//  version = WASI;
-}
-
 version (WASI):
 
 @safe:

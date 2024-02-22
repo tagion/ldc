@@ -906,6 +906,11 @@ else static if (hasExecinfo) private class DefaultTraceInfo : Throwable.TraceInf
 
         static if (enableDwarf)
         {
+            version (WASI)
+                pragma(msg, "----------------- WASI on");
+            else
+                pragma(msg, "----------------- WASI off");
+
             import core.internal.backtrace.dwarf;
             return traceHandlerOpApplyImpl(numframes,
                 i => callstack[i],

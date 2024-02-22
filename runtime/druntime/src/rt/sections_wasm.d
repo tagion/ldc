@@ -18,7 +18,7 @@ enum SharedDarwin = false;
 
 enum IsWindows = false;
 
-static if (SharedELF || SharedDarwin || IsWindows):
+//static if (SharedELF || SharedDarwin || IsWindows):
 
 version (MIPS32)  version = MIPS_Any;
 version (MIPS64)  version = MIPS_Any;
@@ -384,7 +384,7 @@ else
     }
 }
 
-private:
+//private:
 
 // start of linked list for ModuleInfo references
 version (FreeBSD) deprecated extern (C) __gshared void* _Dmodule_ref;
@@ -1094,7 +1094,6 @@ version (Shared) void* handleForAddr(void* addr) nothrow @nogc
 // TLS module helper
 ///////////////////////////////////////////////////////////////////////////////
 
-version (Windows) {} else:
 
 /*
  * Returns: the TLS memory range for a given module and the calling
@@ -1104,27 +1103,8 @@ version (Windows) {} else:
  */
 struct tls_index
 {
-    version (CRuntime_Glibc)
-    {
-        // For x86_64, fields are of type uint64_t, this is important for x32
-        // where tls_index would otherwise have the wrong size.
-        // See https://sourceware.org/git/?p=glibc.git;a=blob;f=sysdeps/x86_64/dl-tls.h
-        version (X86_64)
-        {
-            ulong ti_module;
-            ulong ti_offset;
-        }
-        else
-        {
-            c_ulong ti_module;
-            c_ulong ti_offset;
-        }
-    }
-    else
-    {
-        size_t ti_module;
-        size_t ti_offset;
-    }
+    size_t ti_module;
+    size_t ti_offset;
 }
 
 static if (SharedDarwin)

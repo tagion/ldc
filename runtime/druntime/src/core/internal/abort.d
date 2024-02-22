@@ -42,8 +42,12 @@ void abort(scope string msg, scope string filename = __FILE__, size_t line = __L
         }
     }
     else version (WASI) {
-        void writeStr(scope const(char)[][] m...) @nogc nothrow @trusted;
-        // empty for now
+        import core.sys.wasi.unistd: write;
+        void writeStr(scope const(char)[][] m...) @nogc nothrow @trusted {
+            foreach (s; m)
+                write(2, s.ptr, s.length);
+
+        }
     }
     else
         static assert(0, "Unsupported OS");
