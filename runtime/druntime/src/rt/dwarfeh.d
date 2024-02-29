@@ -12,8 +12,13 @@
 module rt.dwarfeh;
 
 // debug = EH_personality;
+version (Posix)
+    version = PosixWASI;
+else version (WASI)
+    version = PosixWASI;
 
-version (Posix):
+//version (Posix):
+version (PosixWASI):
 
 import rt.dmain2: _d_print_throwable;
 import core.internal.backtrace.unwind;
@@ -95,6 +100,11 @@ else version (RISCV32)
     enum eh_selector_regno = 11;
 }
 else version (LoongArch64)
+{
+    enum eh_exception_regno = 4;
+    enum eh_selector_regno = 5;
+}
+else version (WebAssembly)
 {
     enum eh_exception_regno = 4;
     enum eh_selector_regno = 5;
@@ -475,7 +485,7 @@ version (ARM_EABI_UNWINDER)
         UNWIND_POINTER_REG = 12,
         UNWIND_STACK_REG = 13
     }
-    
+
     extern (C) _Unwind_Reason_Code _d_eh_personality(_Unwind_State state,
                    _Unwind_Exception* exceptionObject, _Unwind_Context* context)
     {
