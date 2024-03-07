@@ -499,7 +499,7 @@ struct SharedObjects
             auto dg = *cast(Callback*) data;
             return dg(SharedObject(*info));
         }
-
+        printf("---- %s dg=%p\n", &__FUNCTION__[0], &dg);
         return dl_iterate_phdr(&nativeCallback, &dg);
     }
 }
@@ -533,6 +533,7 @@ struct SharedObject
 
         static if (IterateManually)
         {
+            printf("//// %s\n", &__FUNCTION__[0]);
             foreach (object; SharedObjects)
             {
                 const(Elf_Phdr)* segment;
@@ -627,8 +628,10 @@ struct SharedObject
      */
     bool findSegmentForAddress(const scope void* address, out const(Elf_Phdr)* result) const
     {
+        printf("/##/ %s address=%p result=%p baseAddress=%p\n", &__FUNCTION__[0], address, result, baseAddress());
         if (address < baseAddress)
             return false;
+        printf("#### %s\n", &__FUNCTION__[0]);
 
         foreach (ref phdr; this)
         {
@@ -639,7 +642,10 @@ struct SharedObject
                 return true;
             }
         }
+        printf("#### %s failed\n", &__FUNCTION__[0]);
+        version(none)
         return false;
+        return true;
     }
 }
 }
@@ -1149,7 +1155,7 @@ version (WASI)
     import core.sys.wasi.missing;
     static if (SharedELF) void scanSegments(const scope ref SharedObject object, DSO* pdso) nothrow @nogc {
         mixin WASIError;
-        assert(0, wasi_error);
+        printf("%s", &wasi_error[0]);
     }
     bool findImageHeaderForAddr(in void* addr, out ImageHeader result) nothrow @nogc {
         mixin WASIError;
