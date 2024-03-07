@@ -98,7 +98,6 @@ struct DSO
 {
     static int opApply(scope int delegate(ref DSO) dg)
     {
-
         foreach (dso; _loadedDSOs)
         {
             if (auto res = dg(*dso))
@@ -215,7 +214,6 @@ version (NetBSD) private __gshared void* dummy_ref;
  */
 void initSections() nothrow @nogc
 {
-    printf("-$-$ %s\n", &__FUNCTION__[0]);
     _isRuntimeInitialized = true;
     // reference symbol to support weak linkage
     version (FreeBSD) dummy_ref = &_d_dso_registry;
@@ -359,7 +357,6 @@ else
     Array!(void[])* initTLSRanges() nothrow @nogc
     {
         auto rngs = &_tlsRanges();
-        printf("---$ %s rngs.empty=%d\n", &__FUNCTION__[0], rngs.empty);
         if (rngs.empty)
         {
             foreach (ref pdso; _loadedDSOs)
@@ -448,11 +445,7 @@ else
      * Static DSOs loaded by the runtime linker. This includes the
      * executable. These can't be unloaded.
      */
-    @property ref Array!(DSO*) _loadedDSOs() @nogc nothrow {
-            printf("$$$ %s:%d DSO=%s\n", &__FUNCTION__[0], __LINE__, &DSO.mangleof[0]);
-            __gshared Array!(DSO*) x;
-            return x;
-    }
+    @property ref Array!(DSO*) _loadedDSOs() @nogc nothrow { __gshared Array!(DSO*) x; return x; }
     //__gshared Array!(DSO*) _loadedDSOs;
 
     /*
@@ -464,7 +457,6 @@ else
         if (x is null)
             x = cast(Array!(void[])*).calloc(1, Array!(void[]).sizeof);
         safeAssert(x !is null, "Failed to allocate TLS ranges");
-        printf("#### %s tls x.length=%d\n", &__FUNCTION__[0], x.length);
         return *x;
     }
     //Array!(void[]) _tlsRanges;
@@ -499,7 +491,6 @@ struct SharedObjects
             auto dg = *cast(Callback*) data;
             return dg(SharedObject(*info));
         }
-        printf("---- %s dg=%p\n", &__FUNCTION__[0], &dg);
         return dl_iterate_phdr(&nativeCallback, &dg);
     }
 }
@@ -524,16 +515,11 @@ struct SharedObject
      */
     static bool findForAddress(const scope void* address, out SharedObject result)
     {
-        version (linux)        enum IterateManually = true;
-        else version (NetBSD)  enum IterateManually = true;
-        else version (OpenBSD) enum IterateManually = true;
-        else version (Solaris) enum IterateManually = true;
-        else version (WASI)    enum IterateManually = true;
-        else                   enum IterateManually = false;
+        version (WASI)    enum IterateManually = true;
+        else              enum IterateManually = false;
 
         static if (IterateManually)
         {
-            printf("//// %s\n", &__FUNCTION__[0]);
             foreach (object; SharedObjects)
             {
                 const(Elf_Phdr)* segment;
@@ -628,10 +614,8 @@ struct SharedObject
      */
     bool findSegmentForAddress(const scope void* address, out const(Elf_Phdr)* result) const
     {
-        printf("/##/ %s address=%p result=%p baseAddress=%p\n", &__FUNCTION__[0], address, result, baseAddress());
         if (address < baseAddress)
             return false;
-        printf("#### %s\n", &__FUNCTION__[0]);
 
         foreach (ref phdr; this)
         {
@@ -642,10 +626,8 @@ struct SharedObject
                 return true;
             }
         }
-        printf("#### %s failed\n", &__FUNCTION__[0]);
-        version(none)
-        return false;
-        return true;
+        version(none) return false;
+        return true; /// Hacked to get it work with WASI without DSO
     }
 }
 }
@@ -679,15 +661,12 @@ T[] toRange(T)(T* beg, T* end) { return beg[0 .. end - beg]; }
 package extern(C) void _d_dso_registry(void* arg)
 {
     auto data = cast(CompilerDSOData*) arg;
-    printf("-$- %s arg=%p\n", &__FUNCTION__[0], arg);
-    printf("-$- %s data._version=%d\n", &__FUNCTION__[0], data._version);
     // only one supported currently
     safeAssert(data._version >= 1, "Incompatible compiler-generated DSO data version.");
 
     // no backlink => register
     if (*data._slot is null)
     {
-        printf(" 2 %s data._slot=%p\n", &__FUNCTION__[0], *data._slot);
         immutable firstDSO = _loadedDSOs.empty;
         if (firstDSO) initLocks();
 
@@ -695,7 +674,6 @@ package extern(C) void _d_dso_registry(void* arg)
         static assert(__traits(isZeroInit, DSO));
         pdso._slot = data._slot;
         *data._slot = pdso; // store backlink in library record
-        printf(" 3 %s data._slot=%p\n", &__FUNCTION__[0], *data._slot);
 
         version (Windows)
         {
@@ -708,13 +686,10 @@ package extern(C) void _d_dso_registry(void* arg)
             version (LDC)
             {
                 auto minfoBeg = data._minfo_beg;
-                printf(" 4 %s data._minfo_bag=%p\n", &__FUNCTION__[0], data._minfo_beg);
                 while (minfoBeg < data._minfo_end && !*minfoBeg) ++minfoBeg;
                 auto minfoEnd = minfoBeg;
-                printf(" 5 %s minfoEnd=%p\n", &__FUNCTION__[0], minfoEnd);
                 while (minfoEnd < data._minfo_end && *minfoEnd) ++minfoEnd;
                 pdso._moduleGroup = ModuleGroup(toRange(minfoBeg, minfoEnd));
-                printf(" 6 %s pdso._moduleGroup=%p\n", &__FUNCTION__[0], pdso);
             }
             else
                 pdso._moduleGroup = ModuleGroup(toRange(data._minfo_beg, data._minfo_end));
@@ -722,13 +697,10 @@ package extern(C) void _d_dso_registry(void* arg)
             static if (SharedDarwin) pdso._getTLSAnchor = data._getTLSAnchor;
 
             ImageHeader header = void;
-            printf(" 7 %s header\n", &__FUNCTION__[0]);
             const headerFound = findImageHeaderForAddr(data._slot, header);
-            printf(" 8 %s headerFound=%d\n", &__FUNCTION__[0], headerFound);
             safeAssert(headerFound, "Failed to find image header.");
         }
 
-        printf("-1-- %s:%d\n", &__FUNCTION__[0], __LINE__);
         scanSegments(header, pdso);
 
         version (Shared)
@@ -1155,11 +1127,11 @@ version (WASI)
     import core.sys.wasi.missing;
     static if (SharedELF) void scanSegments(const scope ref SharedObject object, DSO* pdso) nothrow @nogc {
         mixin WASIError;
-        printf("%s", &wasi_error[0]);
+        version(PRINTF) printf("%s", &wasi_error[0]);
     }
     bool findImageHeaderForAddr(in void* addr, out ImageHeader result) nothrow @nogc {
         mixin WASIError;
-        printf("%s addr=%p\n", &wasi_error[0], addr);
+        //printf("%s addr=%p\n", &wasi_error[0], addr);
         return SharedObject.findForAddress(addr, result);
         assert(0, wasi_error);
     }

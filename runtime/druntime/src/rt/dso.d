@@ -48,7 +48,6 @@ version (PosixWASI)
     pragma(crt_constructor)
     void register_dso()
     {
-        printf("$#$#$ %s\n", &__FUNCTION__[0]);
         dsoData._version = 1;
         dsoData._slot = &dsoSlot;
         dsoData._minfo_beg = &__start___minfo;
