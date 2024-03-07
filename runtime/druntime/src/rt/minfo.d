@@ -604,6 +604,8 @@ extern (C)
 {
 void rt_moduleCtor()
 {
+    import core.stdc.stdio;
+    printf("--- %s SectionGroup.length=%s\n", &__FUNCTION__[0], &SectionGroup.mangleof[0]);
     foreach (ref sg; SectionGroup)
     {
         sg.moduleGroup.sortCtors();
@@ -613,6 +615,8 @@ void rt_moduleCtor()
 
 void rt_moduleTlsCtor()
 {
+    import core.stdc.stdio;
+    printf("--- %s SectionGroup.length=%s\n", &__FUNCTION__[0], &SectionGroup.mangleof[0]);
     foreach (ref sg; SectionGroup)
     {
         sg.moduleGroup.runTlsCtors();
@@ -621,6 +625,8 @@ void rt_moduleTlsCtor()
 
 void rt_moduleTlsDtor()
 {
+    import core.stdc.stdio;
+    printf("--- %s\n", &__FUNCTION__[0]);
     foreach_reverse (ref sg; SectionGroup)
     {
         sg.moduleGroup.runTlsDtors();
@@ -629,6 +635,8 @@ void rt_moduleTlsDtor()
 
 void rt_moduleDtor()
 {
+    import core.stdc.stdio;
+    printf("--- %s\n", &__FUNCTION__[0]);
     foreach_reverse (ref sg; SectionGroup)
     {
         sg.moduleGroup.runDtors();

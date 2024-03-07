@@ -35,4 +35,8 @@ enum __USE_FILE_OFFSET64 = _FILE_OFFSET_BITS == 64;
 enum __USE_LARGEFILE     = __USE_FILE_OFFSET64 && !__REDIRECT;
 enum __USE_LARGEFILE64   = __USE_FILE_OFFSET64 && !__REDIRECT;
 
-enum __WORDSIZE=64;
+version (D_LP64)
+    enum __WORDSIZE=64;
+else
+    enum __WORDSIZE=32;
+

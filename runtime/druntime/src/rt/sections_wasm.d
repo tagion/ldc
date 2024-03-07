@@ -12,6 +12,7 @@ module rt.sections_wasm;
 
 version (WASI):
 
+import core.sys.wasi.link;
 enum SharedELF = true;
 
 enum SharedDarwin = false;
@@ -24,6 +25,8 @@ version (MIPS32)  version = MIPS_Any;
 version (MIPS64)  version = MIPS_Any;
 version (RISCV32) version = RISCV_Any;
 version (RISCV64) version = RISCV_Any;
+
+private alias ImageHeader = SharedObject;
 
 // debug = PRINTF;
 import core.internal.elf.dl;
@@ -95,6 +98,7 @@ struct DSO
 {
     static int opApply(scope int delegate(ref DSO) dg)
     {
+
         foreach (dso; _loadedDSOs)
         {
             if (auto res = dg(*dso))
@@ -211,6 +215,7 @@ version (NetBSD) private __gshared void* dummy_ref;
  */
 void initSections() nothrow @nogc
 {
+    printf("-$-$ %s\n", &__FUNCTION__[0]);
     _isRuntimeInitialized = true;
     // reference symbol to support weak linkage
     version (FreeBSD) dummy_ref = &_d_dso_registry;
@@ -354,6 +359,7 @@ else
     Array!(void[])* initTLSRanges() nothrow @nogc
     {
         auto rngs = &_tlsRanges();
+        printf("---$ %s rngs.empty=%d\n", &__FUNCTION__[0], rngs.empty);
         if (rngs.empty)
         {
             foreach (ref pdso; _loadedDSOs)
@@ -442,7 +448,11 @@ else
      * Static DSOs loaded by the runtime linker. This includes the
      * executable. These can't be unloaded.
      */
-    @property ref Array!(DSO*) _loadedDSOs() @nogc nothrow { __gshared Array!(DSO*) x; return x; }
+    @property ref Array!(DSO*) _loadedDSOs() @nogc nothrow {
+            printf("$$$ %s:%d DSO=%s\n", &__FUNCTION__[0], __LINE__, &DSO.mangleof[0]);
+            __gshared Array!(DSO*) x;
+            return x;
+    }
     //__gshared Array!(DSO*) _loadedDSOs;
 
     /*
@@ -454,6 +464,7 @@ else
         if (x is null)
             x = cast(Array!(void[])*).calloc(1, Array!(void[]).sizeof);
         safeAssert(x !is null, "Failed to allocate TLS ranges");
+        printf("#### %s tls x.length=%d\n", &__FUNCTION__[0], x.length);
         return *x;
     }
     //Array!(void[]) _tlsRanges;
@@ -471,29 +482,169 @@ extern(C) extern __gshared int __rt_dso_ref;
 @assumeUsed __gshared dummy = &__rt_dso_ref;
 
 version(WebAssembly) {
-    struct SharedObject {
+/**
+ * Enables iterating over the process' currently loaded shared objects.
+ */
+struct SharedObjects
+{
+@nogc nothrow:
+    ///
+    alias Callback = int delegate(SharedObject);
+
+    ///
+    static int opApply(scope Callback dg)
+    {
+        extern(C) int nativeCallback(dl_phdr_info* info, size_t, void* data)
+        {
+            auto dg = *cast(Callback*) data;
+            return dg(SharedObject(*info));
+        }
+
+        return dl_iterate_phdr(&nativeCallback, &dg);
     }
 }
-version (Darwin)
-    private alias ImageHeader = mach_header*;
-else version (Windows)
-    private alias ImageHeader = IMAGE_DOS_HEADER*;
-else
-    private alias ImageHeader = SharedObject;
 
-version (Darwin)
+/**
+ * A loaded shared ELF object/binary, i.e., executable or shared library.
+ */
+struct SharedObject
 {
-    extern(C) alias GetTLSAnchor = void* function() nothrow @nogc;
-}
-else version (Windows)
-{
-    alias GetTLSRange = void[] function() nothrow @nogc;
+@nogc nothrow:
+    /// Returns the executable of the current process.
+    static SharedObject thisExecutable()
+    {
+        foreach (object; SharedObjects)
+            return object; // first object
+        assert(0);
+    }
 
-    extern(C) bool gc_isProxied() nothrow @nogc; // in core.internal.gc.proxy
+    /**
+     * Tries to find the shared object containing the specified address in one of its segments.
+     * Returns: True on success.
+     */
+    static bool findForAddress(const scope void* address, out SharedObject result)
+    {
+        version (linux)        enum IterateManually = true;
+        else version (NetBSD)  enum IterateManually = true;
+        else version (OpenBSD) enum IterateManually = true;
+        else version (Solaris) enum IterateManually = true;
+        else version (WASI)    enum IterateManually = true;
+        else                   enum IterateManually = false;
+
+        static if (IterateManually)
+        {
+            foreach (object; SharedObjects)
+            {
+                const(Elf_Phdr)* segment;
+                if (object.findSegmentForAddress(address, segment))
+                {
+                    result = object;
+                    return true;
+                }
+            }
+            return false;
+        }
+        else
+        {
+            return !!_rtld_addr_phdr(address, &result.info);
+        }
+    }
+
+    /// OS-dependent info structure.
+    dl_phdr_info info;
+
+    /// Returns the base address of the object.
+    @property void* baseAddress() const
+    {
+        return cast(void*) info.dlpi_addr;
+    }
+
+    /// Returns the name of (usually: path to) the object. Null-terminated.
+    const(char)[] name() const
+    {
+        import core.stdc.string : strlen;
+
+        const(char)* cstr = info.dlpi_name;
+
+        // the main executable has an empty name
+        if (cstr[0] == 0)
+            cstr = getprogname();
+
+        return cstr[0 .. strlen(cstr)];
+    }
+
+    /**
+     * Tries to fill the specified buffer with the path to the ELF file,
+     * according to the /proc/<PID>/maps file.
+     *
+     * Returns: The filled slice (null-terminated), or null if an error occurs.
+     */
+    char[] getPath(size_t N)(ref char[N] buffer) const
+    if (N > 1)
+    {
+        import core.stdc.stdio, core.stdc.string, core.sys.posix.unistd;
+
+        char[N + 128] lineBuffer = void;
+
+        snprintf(lineBuffer.ptr, lineBuffer.length, "/proc/%d/maps", getpid());
+        auto file = fopen(lineBuffer.ptr, "r");
+        if (!file)
+            return null;
+        scope(exit) fclose(file);
+
+        const thisBase = cast(ulong) baseAddress();
+        ulong startAddress;
+
+        // prevent overflowing `buffer` by specifying the max length in the scanf format string
+        enum int maxPathLength = N - 1;
+        enum scanFormat = "%llx-%*llx %*s %*s %*s %*s %" ~ maxPathLength.stringof ~ "s";
+
+        while (fgets(lineBuffer.ptr, lineBuffer.length, file))
+        {
+            if (sscanf(lineBuffer.ptr, scanFormat.ptr, &startAddress, buffer.ptr) == 2 &&
+                startAddress == thisBase)
+                return buffer[0 .. strlen(buffer.ptr)];
+        }
+
+        return null;
+    }
+
+    /// Iterates over this object's segments.
+    int opApply(scope int delegate(ref const Elf_Phdr) @nogc nothrow dg) const
+    {
+        foreach (ref phdr; info.dlpi_phdr[0 .. info.dlpi_phnum])
+        {
+            const r = dg(phdr);
+            if (r != 0)
+                return r;
+        }
+        return 0;
+    }
+
+    /**
+     * Tries to find the segment containing the specified address.
+     * Returns: True on success.
+     */
+    bool findSegmentForAddress(const scope void* address, out const(Elf_Phdr)* result) const
+    {
+        if (address < baseAddress)
+            return false;
+
+        foreach (ref phdr; this)
+        {
+            const begin = baseAddress + phdr.p_vaddr;
+            if (cast(size_t)(address - begin) < phdr.p_memsz)
+            {
+                result = &phdr;
+                return true;
+            }
+        }
+        return false;
+    }
+}
 }
 
-/*
- * This data structure is generated by the compiler, and then passed to
+/* This data structure is generated by the compiler, and then passed to
  * _d_dso_registry().
  */
 package struct CompilerDSOData
@@ -522,13 +673,15 @@ T[] toRange(T)(T* beg, T* end) { return beg[0 .. end - beg]; }
 package extern(C) void _d_dso_registry(void* arg)
 {
     auto data = cast(CompilerDSOData*) arg;
-
+    printf("-$- %s arg=%p\n", &__FUNCTION__[0], arg);
+    printf("-$- %s data._version=%d\n", &__FUNCTION__[0], data._version);
     // only one supported currently
     safeAssert(data._version >= 1, "Incompatible compiler-generated DSO data version.");
 
     // no backlink => register
     if (*data._slot is null)
     {
+        printf(" 2 %s data._slot=%p\n", &__FUNCTION__[0], *data._slot);
         immutable firstDSO = _loadedDSOs.empty;
         if (firstDSO) initLocks();
 
@@ -536,6 +689,7 @@ package extern(C) void _d_dso_registry(void* arg)
         static assert(__traits(isZeroInit, DSO));
         pdso._slot = data._slot;
         *data._slot = pdso; // store backlink in library record
+        printf(" 3 %s data._slot=%p\n", &__FUNCTION__[0], *data._slot);
 
         version (Windows)
         {
@@ -548,10 +702,13 @@ package extern(C) void _d_dso_registry(void* arg)
             version (LDC)
             {
                 auto minfoBeg = data._minfo_beg;
+                printf(" 4 %s data._minfo_bag=%p\n", &__FUNCTION__[0], data._minfo_beg);
                 while (minfoBeg < data._minfo_end && !*minfoBeg) ++minfoBeg;
                 auto minfoEnd = minfoBeg;
+                printf(" 5 %s minfoEnd=%p\n", &__FUNCTION__[0], minfoEnd);
                 while (minfoEnd < data._minfo_end && *minfoEnd) ++minfoEnd;
                 pdso._moduleGroup = ModuleGroup(toRange(minfoBeg, minfoEnd));
+                printf(" 6 %s pdso._moduleGroup=%p\n", &__FUNCTION__[0], pdso);
             }
             else
                 pdso._moduleGroup = ModuleGroup(toRange(data._minfo_beg, data._minfo_end));
@@ -559,10 +716,13 @@ package extern(C) void _d_dso_registry(void* arg)
             static if (SharedDarwin) pdso._getTLSAnchor = data._getTLSAnchor;
 
             ImageHeader header = void;
+            printf(" 7 %s header\n", &__FUNCTION__[0]);
             const headerFound = findImageHeaderForAddr(data._slot, header);
+            printf(" 8 %s headerFound=%d\n", &__FUNCTION__[0], headerFound);
             safeAssert(headerFound, "Failed to find image header.");
         }
 
+        printf("-1-- %s:%d\n", &__FUNCTION__[0], __LINE__);
         scanSegments(header, pdso);
 
         version (Shared)
@@ -993,6 +1153,8 @@ version (WASI)
     }
     bool findImageHeaderForAddr(in void* addr, out ImageHeader result) nothrow @nogc {
         mixin WASIError;
+        printf("%s addr=%p\n", &wasi_error[0], addr);
+        return SharedObject.findForAddress(addr, result);
         assert(0, wasi_error);
     }
 }

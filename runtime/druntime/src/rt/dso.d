@@ -13,7 +13,10 @@ module rt.dso;
 pragma(LDC_no_moduleinfo); // not needed; avoid collision across shared druntime and other binaries
 
 import ldc.attributes : hidden;
-import rt.sections_elf_shared; // : CompilerDSOData, _d_dso_registry;
+version(WASI)
+    import rt.sections_wasm;
+else
+    import rt.sections_elf_shared; // : CompilerDSOData, _d_dso_registry;
 
 static if (is(CompilerDSOData)): // only for targets supporting rt.sections_elf_shared
 
@@ -35,12 +38,17 @@ extern(C) __gshared int __rt_dso_ref = 0;
 __gshared CompilerDSOData dsoData;
 __gshared void* dsoSlot;
 
-version (Posix)
+version(Posix) version = PosixWASI;
+version(WASI) version = PosixWASI;
+import core.stdc.stdio;
+
+version (PosixWASI)
 {
     // Automatically registers this DSO with druntime.
     pragma(crt_constructor)
     void register_dso()
     {
+        printf("$#$#$ %s\n", &__FUNCTION__[0]);
         dsoData._version = 1;
         dsoData._slot = &dsoSlot;
         dsoData._minfo_beg = &__start___minfo;
