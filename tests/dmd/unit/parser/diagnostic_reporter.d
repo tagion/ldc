@@ -29,7 +29,7 @@ unittest
     {
         int errorCount;
 
-        override bool error(const ref Loc, const(char)*, va_list, const(char)*, const(char)*)
+        override bool error(const ref SourceLoc, const(char)*, va_list, const(char)*, const(char)*)
         {
             errorCount++;
             return true;
@@ -52,7 +52,7 @@ unittest
     {
         int supplementalCount;
 
-        override bool errorSupplemental(const ref Loc, const(char)*, va_list, const(char)*, const(char)*)
+        override bool errorSupplemental(const ref SourceLoc, const(char)*, va_list, const(char)*, const(char)*)
         {
             supplementalCount++;
             return true;
@@ -70,35 +70,4 @@ unittest
     });
 
     assert(reporter.supplementalCount == 1);
-}
-
-@("warnings: dangling else")
-unittest
-{
-    static class WarningCountingDiagnosticReporter : NoopDiagnosticReporter
-    {
-        int warningCount;
-
-        override bool warning(const ref Loc, const(char)*, va_list, const(char)*, const(char)*)
-        {
-            warningCount++;
-            return true;
-        }
-    }
-
-    global.params.warnings = DiagnosticReporting.inform;
-    scope reporter = new WarningCountingDiagnosticReporter;
-
-    parseModule("test.d", q{
-        void main()
-        {
-        	if (true)
-        		if (false)
-        			assert(3);
-            else
-                assert(4);
-        }
-    });
-
-    assert(reporter.warningCount == 1);
 }

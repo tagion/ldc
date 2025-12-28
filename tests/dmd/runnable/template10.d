@@ -1,5 +1,6 @@
 // DISABLED: LDC
 // PERMUTE_ARGS: -inline
+// REQUIRED_ARGS: -verrors=simple -verrors=0
 /* TEST_OUTPUT:
 ---
 runnable/template10.d(89): Deprecation: function `template10.test1b.f0.f!(a).f` function requires a dual-context, which is deprecated
@@ -32,8 +33,8 @@ runnable/template10.d(366): Deprecation: function `template10.test6c.f0.exec!(f)
 runnable/template10.d(385):        instantiated from here: `exec!(f)`
 runnable/template10.d(410): Deprecation: function `template10.test7.C!(c).sum` function requires a dual-context, which is deprecated
 runnable/template10.d(437):        instantiated from here: `C!(c)`
-runnable/template10.d(464): Deprecation: constructor `template10.test8.__ctor!(a).this` function requires a dual-context, which is deprecated
-runnable/template10.d(484):        instantiated from here: `__ctor!(a)`
+runnable/template10.d(464): Deprecation: constructor `template10.test8.this!(a).this` function requires a dual-context, which is deprecated
+runnable/template10.d(484):        instantiated from here: `this!(a)`
 runnable/template10.d(468): Deprecation: function `template10.test8.add!(b).add` function requires a dual-context, which is deprecated
 runnable/template10.d(486):        instantiated from here: `add!(b)`
 runnable/template10.d(446): Deprecation: function `template10.test8.sub!(b).sub` function requires a dual-context, which is deprecated
@@ -59,7 +60,6 @@ runnable/template10.d(741):        instantiated from here: `fun!(n)`
 */
 
 /********************************************/
-
 void test1a()
 {
     int a = 1;

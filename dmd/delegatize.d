@@ -3,12 +3,12 @@
  *
  * Specification: $(LINK2 https://dlang.org/spec/function.html#lazy-params, Lazy Parameters)
  *
- * Copyright:   Copyright (C) 1999-2024 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2025 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 https://www.digitalmars.com, Walter Bright)
  * License:     $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
- * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/delegatize.d, _delegatize.d)
+ * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/compiler/src/dmd/delegatize.d, _delegatize.d)
  * Documentation:  https://dlang.org/phobos/dmd_delegatize.html
- * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/src/dmd/delegatize.d
+ * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/compiler/src/dmd/delegatize.d
  */
 
 module dmd.delegatize;
@@ -18,17 +18,19 @@ import dmd.astenums;
 import dmd.declaration;
 import dmd.dscope;
 import dmd.dsymbol;
+import dmd.dsymbolsem : toParentP;
 import dmd.expression;
 import dmd.expressionsem;
 import dmd.func;
+import dmd.funcsem : checkNestedReference;
 import dmd.init;
 import dmd.initsem;
 import dmd.location;
 import dmd.mtype;
-import dmd.postordervisitor;
 import dmd.statement;
 import dmd.tokens;
 import dmd.visitor;
+import dmd.visitor.postorder;
 
 
 /*********************************
@@ -179,6 +181,11 @@ private void lambdaSetParent(Expression e, FuncDeclaration fd)
                     iz.accept(this);
             }
         }
+        override void visit(AssocArrayLiteralExp e)
+        {
+            if (e.lowering)
+                walkPostorder(e.lowering, this);
+        }
     }
 
     scope LambdaSetParent lsp = new LambdaSetParent(fd);
@@ -215,15 +222,13 @@ bool lambdaCheckForNestedRef(Expression e, Scope* sc)
 
         override void visit(SymOffExp e)
         {
-            VarDeclaration v = e.var.isVarDeclaration();
-            if (v)
+            if (VarDeclaration v = e.var.isVarDeclaration())
                 result = v.checkNestedReference(sc, Loc.initial);
         }
 
         override void visit(VarExp e)
         {
-            VarDeclaration v = e.var.isVarDeclaration();
-            if (v)
+            if (VarDeclaration v = e.var.isVarDeclaration())
                 result = v.checkNestedReference(sc, Loc.initial);
         }
 
@@ -235,8 +240,7 @@ bool lambdaCheckForNestedRef(Expression e, Scope* sc)
 
         override void visit(DeclarationExp e)
         {
-            VarDeclaration v = e.declaration.isVarDeclaration();
-            if (v)
+            if (VarDeclaration v = e.declaration.isVarDeclaration())
             {
                 result = v.checkNestedReference(sc, Loc.initial);
                 if (result)

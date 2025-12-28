@@ -22,8 +22,8 @@
 #include "dmd/statement.h"
 #include "dmd/target.h"
 #include "dmd/template.h"
+#include "dmd/timetrace.h"
 #include "driver/cl_options_instrumentation.h"
-#include "driver/timetrace.h"
 #include "gen/abi/abi.h"
 #include "gen/arrays.h"
 #include "gen/functions.h"
@@ -57,6 +57,8 @@
 #if _AIX || __sun
 #include <alloca.h>
 #endif
+
+using namespace dmd;
 
 static llvm::cl::opt<bool, true>
     preservePaths("op", llvm::cl::ZeroOrMore,
@@ -134,10 +136,7 @@ LLFunction *build_module_reference_and_ctor(const char *moduleMangle,
 
   // provide the default initializer
   LLStructType *modulerefTy = DtoModuleReferenceType();
-  LLConstant *mrefvalues[] = {
-      LLConstant::getNullValue(modulerefTy->getContainedType(0)),
-      llvm::ConstantExpr::getBitCast(moduleinfo,
-                                     modulerefTy->getContainedType(1))};
+  LLConstant *mrefvalues[] = {getNullPtr(), moduleinfo};
   LLConstant *thismrefinit = LLConstantStruct::get(
       modulerefTy, llvm::ArrayRef<LLConstant *>(mrefvalues));
 
@@ -149,13 +148,11 @@ LLFunction *build_module_reference_and_ctor(const char *moduleMangle,
   // make sure _Dmodule_ref is declared
   const auto mrefIRMangle = getIRMangledVarName("_Dmodule_ref", LINK::c);
   LLConstant *mref = gIR->module.getNamedGlobal(mrefIRMangle);
-  LLType *modulerefPtrTy = getPtrToType(modulerefTy);
+  LLType *ptrTy = getOpaquePtrType();
   if (!mref) {
-    mref =
-        declareGlobal(Loc(), gIR->module, modulerefPtrTy, mrefIRMangle, false,
-                      false, global.params.dllimport != DLLImport::none);
+    mref = declareGlobal(Loc(), gIR->module, ptrTy, mrefIRMangle, false, false,
+                         false);
   }
-  mref = DtoBitCast(mref, getPtrToType(modulerefPtrTy));
 
   // make the function insert this moduleinfo as the beginning of the
   // _Dmodule_ref linked list
@@ -167,7 +164,7 @@ LLFunction *build_module_reference_and_ctor(const char *moduleMangle,
   gIR->DBuilder.EmitModuleCTor(ctor, fname.c_str());
 
   // get current beginning
-  LLValue *curbeg = builder.CreateLoad(modulerefPtrTy, mref, "current");
+  LLValue *curbeg = builder.CreateLoad(ptrTy, mref, "current");
 
   // put current beginning as the next of this one
   LLValue *gep = builder.CreateStructGEP(
@@ -187,8 +184,6 @@ LLFunction *build_module_reference_and_ctor(const char *moduleMangle,
 // .minfo (COFF & MachO) / __minfo section.
 void emitModuleRefToSection(std::string moduleMangle,
                             llvm::Constant *thisModuleInfo) {
-  const auto moduleInfoPtrTy = DtoPtrToType(getModuleInfoType());
-
   const auto &triple = *global.params.targetTriple;
   const auto sectionName =
       triple.isOSBinFormatCOFF()
@@ -197,9 +192,9 @@ void emitModuleRefToSection(std::string moduleMangle,
 
   const auto thismrefIRMangle =
       getIRMangledModuleRefSymbolName(moduleMangle.c_str());
-  auto thismref = defineGlobal(Loc(), gIR->module, thismrefIRMangle,
-                               DtoBitCast(thisModuleInfo, moduleInfoPtrTy),
-                               LLGlobalValue::LinkOnceODRLinkage, false, false);
+  auto thismref =
+      defineGlobal(Loc(), gIR->module, thismrefIRMangle, thisModuleInfo,
+                   LLGlobalValue::LinkOnceODRLinkage, false, false);
   thismref->setVisibility(LLGlobalValue::HiddenVisibility);
   thismref->setSection(sectionName);
   gIR->usedArray.push_back(thismref);
@@ -235,11 +230,8 @@ void addCoverageAnalysis(Module *m) {
     m->d_cover_valid = new llvm::GlobalVariable(
         gIR->module, type, /*isConstant=*/true, LLGlobalValue::InternalLinkage,
         zeroinitializer, "_d_cover_valid");
-    LLConstant *idxs[] = {DtoConstUint(0), DtoConstUint(0)};
-    d_cover_valid_slice =
-        DtoConstSlice(DtoConstSize_t(type->getArrayNumElements()),
-                      llvm::ConstantExpr::getGetElementPtr(
-                          type, m->d_cover_valid, idxs, true));
+    d_cover_valid_slice = DtoConstSlice(
+        DtoConstSize_t(type->getArrayNumElements()), m->d_cover_valid);
 
     // Assert that initializer array elements have enough bits
     assert(sizeof(m->d_cover_valid_init[0]) * 8 >=
@@ -270,9 +262,8 @@ void addCoverageAnalysis(Module *m) {
                                                LLGlobalValue::InternalLinkage,
                                                init, "_d_cover_data");
 
-    d_cover_data_slice = DtoConstSlice(DtoConstSize_t(m->numlines),
-                                       DtoGEP(m->d_cover_data->getValueType(),
-                                              m->d_cover_data, 0, 0));
+    d_cover_data_slice =
+        DtoConstSlice(DtoConstSize_t(m->numlines), m->d_cover_data);
   }
 
   // Create "static constructor" that calls _d_cover_register2(string filename,
@@ -295,14 +286,7 @@ void addCoverageAnalysis(Module *m) {
         LLFunction::Create(ctorTy, LLGlobalValue::InternalLinkage,
                            getIRMangledFuncName(ctorname, LINK::d), &gIR->module);
     ctor->setCallingConv(gABI->callingConv(LINK::d));
-    // Set function attributes. See functions.cpp:DtoDefineFunction()
-    if (global.params.targetTriple->getArch() == llvm::Triple::x86_64) {
-#if LDC_LLVM_VER >= 1500
-      ctor->setUWTableKind(llvm::UWTableKind::Default);
-#else
-      ctor->addFnAttr(LLAttribute::UWTable);
-#endif
-    }
+    gABI->setUnwindTableKind(ctor);
 
     llvm::BasicBlock *bb = llvm::BasicBlock::Create(gIR->context(), "", ctor);
     IRBuilder<> builder(bb);
@@ -402,27 +386,43 @@ void registerModuleInfo(Module *m) {
 }
 
 void addModuleFlags(llvm::Module &m) {
-#if LDC_LLVM_VER >= 1500
   const auto ModuleMinFlag = llvm::Module::Min;
-#else
-  const auto ModuleMinFlag = llvm::Module::Warning; // Fallback value
-#endif
+  const auto ConstantOne =
+      llvm::ConstantInt::get(LLType::getInt32Ty(m.getContext()), 1);
+  const auto ConstantOneMetadata = llvm::ConstantAsMetadata::get(ConstantOne);
 
   if (opts::fCFProtection == opts::CFProtectionType::Return ||
       opts::fCFProtection == opts::CFProtectionType::Full) {
-    m.addModuleFlag(ModuleMinFlag, "cf-protection-return", 1);
+    m.setModuleFlag(ModuleMinFlag, "cf-protection-return", ConstantOneMetadata);
   }
 
   if (opts::fCFProtection == opts::CFProtectionType::Branch ||
       opts::fCFProtection == opts::CFProtectionType::Full) {
-    m.addModuleFlag(ModuleMinFlag, "cf-protection-branch", 1);
+    m.setModuleFlag(ModuleMinFlag, "cf-protection-branch", ConstantOneMetadata);
+  }
+
+  // Target specific flags
+  const auto ModuleErrFlag = llvm::Module::Error;
+  switch (global.params.targetTriple->getArch()) {
+  case llvm::Triple::ppc64:
+  case llvm::Triple::ppc64le:
+    if (target.RealProperties.mant_dig == 113) {
+      const auto ConstantIEEE128String = llvm::MDString::get(gIR->context(), "ieeequad");
+      m.setModuleFlag(ModuleErrFlag, "float-abi", ConstantIEEE128String);
+    } else if (target.RealProperties.mant_dig == 106) {
+      const auto ConstantIBM128String = llvm::MDString::get(gIR->context(), "doubledouble");
+      m.setModuleFlag(ModuleErrFlag, "float-abi", ConstantIBM128String);
+    }
+    break;
+  default:
+    break;
   }
 }
 
 } // anonymous namespace
 
 void codegenModule(IRState *irs, Module *m) {
-  TimeTraceScope timeScope("Generate IR", m->toChars(), m->loc);
+  dmd::TimeTraceScope timeScope("Generate IR", m->toChars(), m->loc);
 
   assert(!irs->dmodule &&
          "irs->module not null, codegen already in progress?!");

@@ -2,12 +2,12 @@
  * This module contains the implementation of the C++ header generation available through
  * the command line switch -Hc.
  *
- * Copyright:   Copyright (C) 1999-2024 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2025 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 https://www.digitalmars.com, Walter Bright)
  * License:     $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
- * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/dtohd, _dtoh.d)
+ * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/compiler/src/dmd/dtoh.d, _dtoh.d)
  * Documentation:  https://dlang.org/phobos/dmd_dtoh.html
- * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/src/dmd/dtoh.d
+ * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/compiler/src/dmd/dtoh.d
  */
 module dmd.dtoh;
 
@@ -22,6 +22,7 @@ import dmd.attrib;
 import dmd.dsymbol;
 import dmd.dsymbolsem;
 import dmd.errors;
+import dmd.errorsink;
 import dmd.globals;
 import dmd.hdrgen;
 import dmd.id;
@@ -30,6 +31,7 @@ import dmd.location;
 import dmd.root.filename;
 import dmd.visitor;
 import dmd.tokens;
+import dmd.typesem;
 
 import dmd.common.outbuffer;
 import dmd.utils;
@@ -45,6 +47,7 @@ import dmd.utils;
  *
  * Params:
  *   ms = the modules
+ *   eSink = where to report errors
  *
  * Notes:
  *  - the header is written to `<global.params.cxxhdrdir>/<global.params.cxxhdrfile>`
@@ -53,7 +56,7 @@ import dmd.utils;
  *  - ignored declarations are mentioned in a comment if `global.params.doCxxHdrGeneration`
  *    is set to `CxxHeaderMode.verbose`
  */
-extern(C++) void genCppHdrFiles(ref Modules ms)
+void genCppHdrFiles(ref Modules ms, ErrorSink eSink)
 {
     initialize();
 
@@ -67,7 +70,7 @@ extern(C++) void genCppHdrFiles(ref Modules ms)
     decl.doindent = true;
     decl.spaces = true;
 
-    scope v = new ToCppBuffer(&fwd, &done, &decl);
+    scope v = new ToCppBuffer(&fwd, &done, &decl, eSink);
 
     // Conditionally include another buffer for sanity checks
     debug (Debug_DtoH_Checks)
@@ -103,7 +106,8 @@ extern(C++) void genCppHdrFiles(ref Modules ms)
 
     // Emit array compatibility because extern(C++) types may have slices
     // as members (as opposed to function parameters)
-    buf.writestring(`
+    if (v.hasDArray)
+        buf.writestring(`
 #ifdef CUSTOM_D_ARRAY_TYPE
 #define _d_dynamicArray CUSTOM_D_ARRAY_TYPE
 #else
@@ -129,6 +133,17 @@ struct _d_dynamicArray final
         return ptr[idx];
     }
 };
+#endif
+`);
+
+    if (v.hasExternSystem)
+        buf.writestring(`
+#ifndef _WIN32
+#define EXTERN_SYSTEM_AFTER __stdcall
+#define EXTERN_SYSTEM_BEFORE
+#else
+#define EXTERN_SYSTEM_AFTER
+#define EXTERN_SYSTEM_BEFORE extern "C"
 #endif
 `);
 
@@ -246,8 +261,18 @@ public:
     /// Default buffer for the currently visited declaration
     OutBuffer* buf;
 
+    /// Sink for error reporting
+    ErrorSink eSink;
+
     /// The generated header uses `real` emitted as `_d_real`?
-    bool hasReal;
+    bool hasReal = false;
+
+    /// The generated header has extern(System) functions,
+    /// which needs support macros in the header
+    bool hasExternSystem = false;
+
+    /// There are functions taking slices, which need a compatibility struct for C++
+    bool hasDArray = false;
 
     /// The generated header should contain comments for skipped declarations?
     const bool printIgnored;
@@ -309,12 +334,13 @@ public:
     }
     mixin(generateMembers());
 
-    this(OutBuffer* fwdbuf, OutBuffer* donebuf, OutBuffer* buf) scope
+    this(OutBuffer* fwdbuf, OutBuffer* donebuf, OutBuffer* buf, ErrorSink eSink) scope
     {
         this.fwdbuf = fwdbuf;
         this.donebuf = donebuf;
         this.buf = buf;
         this.printIgnored = global.params.cxxhdr.fullOutput;
+        this.eSink = eSink;
     }
 
     /**
@@ -482,17 +508,17 @@ public:
             }
 
             __gshared bool warned = false;
-            warning(loc, "%s `%s` is a %s", kind, ident.toChars(), reason);
+            eSink.warning(loc, "%s `%s` is a %s", kind, ident.toChars(), reason);
 
             if (!warned)
             {
-                warningSupplemental(loc, "The generated C++ header will contain " ~
-                                    "identifiers that are keywords in C++");
+                eSink.warningSupplemental(loc, "The generated C++ header will contain " ~
+                                          "identifiers that are keywords in C++");
                 warned = true;
             }
         }
 
-        if (global.params.warnings != DiagnosticReporting.off || canFix)
+        if (global.params.useWarnings != DiagnosticReporting.off || canFix)
         {
             // Warn about identifiers that are keywords in C++.
             if (auto kc = keywordClass(ident))
@@ -744,7 +770,7 @@ public:
 
         // Note that tf might be null for templated (member) functions
         auto tf = cast(AST.TypeFunction)fd.type;
-        if ((tf && (tf.linkage != LINK.c || adparent) && tf.linkage != LINK.cpp) || (!tf && fd.isPostBlitDeclaration()))
+        if ((tf && (tf.linkage != LINK.c || adparent) && tf.linkage != LINK.cpp && tf.linkage != LINK.windows) || (!tf && fd.isPostBlitDeclaration()))
         {
             ignored("function %s because of linkage", fd.toPrettyChars());
             return checkFunctionNeedsPlaceholder(fd);
@@ -779,10 +805,30 @@ public:
             }
         }
 
+        if (tf && tf.next)
+        {
+            // Ensure return type is declared before a function that returns that is declared.
+            if (auto sty = tf.next.isTypeStruct())
+                ensureDeclared(sty.sym);
+            //else if (auto cty = tf.next.isTypeClass())
+            //    includeSymbol(cty.sym); // classes are returned by pointer only need to forward declare
+            //else if (auto ety = tf.next.isTypeEnum())
+            //    ensureDeclared(ety.sym);
+        }
+
         writeProtection(fd.visibility.kind);
 
-        if (tf && tf.linkage == LINK.c)
+        if (fd._linkage == LINK.system)
+        {
+            hasExternSystem = true;
+            buf.writestring("EXTERN_SYSTEM_BEFORE ");
+        }
+        else if (tf && tf.linkage == LINK.c)
             buf.writestring("extern \"C\" ");
+        else if (tf && tf.linkage == LINK.windows)
+        {
+            // __stdcall is printed after return type
+        }
         else if (!adparent)
             buf.writestring("extern ");
         if (adparent && fd.isStatic())
@@ -855,7 +901,7 @@ public:
     {
         // Omit redundant declarations - the slot was already
         // reserved in the base class
-        if (fd.isVirtual() && fd.isIntroducing())
+        if (fd.isVirtual() && fd.isIntroducing)
         {
             // Hide placeholders because they are not ABI compatible
             writeProtection(AST.Visibility.Kind.private_);
@@ -936,7 +982,8 @@ public:
         {
             EnumKind kind = getEnumKind(type);
 
-            if (vd.visibility.kind == AST.Visibility.Kind.none || vd.visibility.kind == AST.Visibility.Kind.private_) {
+            if (vd.visibility.kind == AST.Visibility.Kind.none || vd.visibility.kind == AST.Visibility.Kind.private_)
+            {
                 ignored("enum `%s` because it is `%s`.", vd.toPrettyChars(), AST.visibilityToChars(vd.visibility.kind));
                 return;
             }
@@ -1123,7 +1170,7 @@ public:
 
         auto fd = ad.aliassym.isFuncDeclaration();
 
-        if (fd && (fd.isGenerated() || fd.isDtorDeclaration()))
+        if (fd && (fd.isGenerated || fd.isDtorDeclaration()))
         {
             // Ignore. It's taken care of while visiting FuncDeclaration
             return;
@@ -1156,7 +1203,7 @@ public:
                 // Print prefix of the base class if this function originates from a superclass
                 // because alias might be resolved through multiple classes, e.g.
                 // e.g. for alias visit = typeof(super).visit in the visitors
-                if (!fd.isIntroducing())
+                if (!fd.isIntroducing)
                     printPrefix(ad.toParent().isClassDeclaration().baseClass);
                 else
                     printPrefix(pd);
@@ -2046,6 +2093,8 @@ public:
     {
         debug (Debug_DtoH) mixin(traceVisit!t);
 
+        hasDArray = true;
+
         if (t.isConst() || t.isImmutable())
             buf.writestring("const ");
         buf.writestring("_d_dynamicArray< ");
@@ -2249,8 +2298,8 @@ public:
      * Writes the function signature to `buf`.
      *
      * Params:
-     *   fd     = the function to print
      *   tf     = fd's type
+     *   fd     = the function to print
      */
     private void funcToBuffer(AST.TypeFunction tf, AST.FuncDeclaration fd)
     {
@@ -2282,9 +2331,18 @@ public:
             assert(tf.next, fd.loc.toChars().toDString());
 
             tf.next == AST.Type.tsize_t ? originalType.next.accept(this) : tf.next.accept(this);
-            if (tf.isref)
+            if (tf.isRef)
                 buf.writeByte('&');
             buf.writeByte(' ');
+
+            if (fd._linkage == LINK.system)
+            {
+                buf.writestring("EXTERN_SYSTEM_AFTER ");
+            }
+            else if (tf.linkage == LINK.windows)
+            {
+                buf.writestring("__stdcall ");
+            }
             writeIdentifier(fd);
         }
 
@@ -2745,7 +2803,7 @@ public:
     {
         if (vd._init && !vd._init.isVoidInitializer())
             return AST.initializerToExpression(vd._init);
-        else if (auto ts = vd.type.isTypeStruct())
+        if (auto ts = vd.type.isTypeStruct())
         {
             if (!ts.sym.noDefaultCtor && !ts.sym.isUnionDeclaration())
             {

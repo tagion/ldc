@@ -20,7 +20,9 @@ struct Config {
     string[] cFlags;
     string[] linkerFlags;
     uint numBuildJobs;
+    bool systemZlib;
     string[string] cmakeVars;
+    string installWithSuffix;
 }
 
 version (Windows) enum exeSuffix = ".exe";
@@ -149,9 +151,12 @@ void prepareLdcSource() {
 void runCMake() {
     const wd = WorkingDirScope(config.buildDir);
 
+    const ldmdExecutable = buildPath(config.ldcExecutable.dirName, "ldmd2" ~ exeSuffix);
+
     string[] args = [
         "cmake",
         "-DLDC_EXE_FULL=" ~ config.ldcExecutable,
+        "-DLDMD_EXE_FULL=" ~ ldmdExecutable,
         "-DDMDFE_MINOR_VERSION=@DMDFE_MINOR_VERSION@",
         "-DDMDFE_PATCH_VERSION=@DMDFE_PATCH_VERSION@",
     ];
@@ -160,6 +165,26 @@ void runCMake() {
     if (config.dFlags.length)       args ~= "-DD_EXTRA_FLAGS=" ~ config.dFlags.join(";");
     if (config.cFlags.length)       args ~= "-DRT_CFLAGS=" ~ config.cFlags.join(" ");
     if (config.linkerFlags.length)  args ~= "-DLD_FLAGS=" ~ config.linkerFlags.join(" ");
+    if (config.systemZlib)          args ~= "-DPHOBOS_SYSTEM_ZLIB=ON";
+    if (config.installWithSuffix.ptr) {
+        args ~= [
+            "-DCMAKE_INSTALL_PREFIX=" ~ config.ldcExecutable.dirName.dirName,
+            "-DLIB_SUFFIX=" ~ config.installWithSuffix,
+        ];
+
+        if (config.installWithSuffix.length) {
+            if ("RT_CONF_TRIPLE_REGEX" !in config.cmakeVars &&
+                config.cmakeVars.get("CONF_INST_DIR", "unset") != "") {
+                writeln(".: Error: when using a non-empty `--installWithSuffix`, either set the RT_CONF_TRIPLE_REGEX CMake variable, or disable installing the .conf file by setting CONF_INST_DIR to an empty string");
+                exit(1);
+            }
+
+            string confSuffix = config.installWithSuffix;
+            if (confSuffix[0] == '-')
+                confSuffix = confSuffix[1 .. $];
+            args ~= "-DRT_CONF_BASE_NAME=55-target-" ~ confSuffix;
+        }
+    }
 
     foreach (pair; config.cmakeVars.byPair)
         args ~= "-D" ~ pair[0] ~ '=' ~ pair[1];
@@ -175,7 +200,8 @@ void runCMake() {
 void build() {
     const wd = WorkingDirScope(config.buildDir);
 
-    string[] args = [ config.ninja ? "ninja" : "make" ];
+    const buildTool = config.ninja ? "ninja" : "make";
+    string[] args = [ buildTool ];
     if (config.numBuildJobs != 0) {
         import std.conv : to;
         args ~= "-j" ~ config.numBuildJobs.to!string;
@@ -185,6 +211,9 @@ void build() {
         args ~= "all-test-runners";
 
     exec(args);
+
+    if (config.installWithSuffix.ptr)
+        exec([buildTool, "install"]);
 }
 
 /**
@@ -324,7 +353,9 @@ void parseCommandLine(string[] args) {
             "dFlags",      "Extra LDC flags for the D modules (separated by ';')", &config.dFlags,
             "cFlags",      "Extra C/ASM compiler flags for the handful of C/ASM files (separated by ';')", &config.cFlags,
             "linkerFlags", "Extra C linker flags for shared libraries and testrunner executables (separated by ';')", &config.linkerFlags,
-            "j",           "Number of parallel build jobs", &config.numBuildJobs
+            "j",           "Number of parallel build jobs", &config.numBuildJobs,
+            "systemZlib",  "Use system zlib instead of Phobos' vendored version", &config.systemZlib,
+            "installWithSuffix", "Install the built libraries to '<directory containing LDC executable>/../lib<suffix>/'. If the libraries are for a cross-compilation target, please set the RT_CONF_TRIPLE_REGEX CMake variable accordingly. Otherwise, you can set CONF_INST_DIR to an empty string to prevent installing the .conf file.", &config.installWithSuffix,
         );
 
         // getopt() has removed all consumed args from `args`

@@ -55,11 +55,12 @@ version (GNU)
 }
 else version (ARM_Any)
 {
-    // Darwin uses a simpler varargs implementation
+    // Darwin and Windows use a simpler varargs implementation
     version (OSX) {}
     else version (iOS) {}
     else version (TVOS) {}
     else version (WatchOS) {}
+    else version (CRuntime_Microsoft) {}
     else:
 
     version (ARM)
@@ -130,6 +131,8 @@ else version (AAPCS32)
 else version (AAPCS64)
 {
     alias va_list = core.internal.vararg.aarch64.va_list;
+    version (DigitalMars)
+        public import core.internal.vararg.aarch64 : __va_list, __va_list_tag;
 }
 else version (RISCV_Any)
 {
@@ -316,7 +319,7 @@ else version (LDC)
 }
 else version (DigitalMars)
 {
-    void va_end(va_list ap) {}
+    void va_end()(va_list ap) {}
 }
 
 

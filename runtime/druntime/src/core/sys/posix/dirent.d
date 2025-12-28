@@ -42,7 +42,18 @@ struct dirent
 }
 */
 
-version (linux)
+version (CRuntime_Bionic)
+{
+    struct dirent
+    {
+        ulong       d_ino;
+        long        d_off;
+        ushort      d_reclen;
+        ubyte       d_type;
+        char[256]   d_name = 0;
+    }
+}
+else version (linux)
 {
     struct dirent
     {
@@ -383,16 +394,14 @@ else version (CRuntime_Musl)
 
     struct DIR
     {
+        // Managed by OS
     }
 
-    static if ( __USE_FILE_OFFSET64 )
+    dirent* readdir(DIR*);
+
+    static if (__USE_LARGEFILE64)
     {
-        dirent* readdir64(DIR*);
-        alias   readdir64 readdir;
-    }
-    else
-    {
-        dirent* readdir(DIR*);
+        alias readdir64 = readdir;
     }
 }
 else version (CRuntime_UClibc)

@@ -189,8 +189,7 @@ version (CRuntime_Glibc)
         void* dli_saddr;
     }
 }
-else
-version (CRuntime_Musl)
+else version (CRuntime_Musl)
 {
     enum RTLD_LAZY   = 1;
     enum RTLD_NOW    = 2;
@@ -372,12 +371,20 @@ else version (Solaris)
 }
 else version (CRuntime_Bionic)
 {
-    enum
+    enum RTLD_LOCAL    = 0;
+    enum RTLD_LAZY     = 0x00001;
+    enum RTLD_NOLOAD   = 0x00004;
+    enum RTLD_NODELETE = 0x01000;
+
+    version (D_LP64)
     {
-        RTLD_NOW    = 0,
-        RTLD_LAZY   = 1,
-        RTLD_LOCAL  = 0,
-        RTLD_GLOBAL = 2
+        enum RTLD_NOW      = 0x00002;
+        enum RTLD_GLOBAL   = 0x00100;
+    }
+    else // NDK: 'LP32 is broken for historical reasons'
+    {
+        enum RTLD_NOW      = 0;
+        enum RTLD_GLOBAL   = 0x00002;
     }
 
     int          dladdr(const scope void*, Dl_info*);
@@ -386,30 +393,6 @@ else version (CRuntime_Bionic)
     void*        dlopen(const scope char*, int);
     void*        dlsym(void*, const scope char*);
 
-    struct Dl_info
-    {
-        const(char)* dli_fname;
-        void*        dli_fbase;
-        const(char)* dli_sname;
-        void*        dli_saddr;
-    }
-}
-else version (CRuntime_Musl)
-{
-    enum {
-        RTLD_LAZY     = 1,
-        RTLD_NOW      = 2,
-        RTLD_NOLOAD   = 4,
-        RTLD_NODELETE = 4096,
-        RTLD_GLOBAL   = 256,
-        RTLD_LOCAL    = 0,
-    }
-    int          dlclose(void*);
-    const(char)* dlerror();
-    void*        dlopen(const scope char*, int);
-    void*        dlsym(void*, const scope char*);
-
-    int dladdr(scope const void *addr, Dl_info *info);
     struct Dl_info
     {
         const(char)* dli_fname;

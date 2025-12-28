@@ -26,10 +26,8 @@
 #include "llvm/MC/SubtargetFeature.h"
 #include "llvm/Support/Host.h"
 #include "llvm/Support/TargetParser.h"
-#if LDC_LLVM_VER >= 1400
 #include "llvm/Support/AArch64TargetParser.h"
 #include "llvm/Support/ARMTargetParser.h"
-#endif
 #else
 #include "llvm/TargetParser/AArch64TargetParser.h"
 #include "llvm/TargetParser/ARMTargetParser.h"
@@ -41,27 +39,30 @@
 #include "llvm/IR/Module.h"
 #include "llvm/MC/MCObjectFileInfo.h"
 #include "llvm/Support/CommandLine.h"
-#if LDC_LLVM_VER >= 1400
 #include "llvm/MC/TargetRegistry.h"
-#else
-#include "llvm/Support/TargetRegistry.h"
-#endif
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
 
 #include "gen/optimizer.h"
 
+#if LDC_LLVM_VER >= 1800
+#define startswith starts_with
+#endif
+
 #ifdef LDC_LLVM_SUPPORTS_MACHO_DWARF_LINE_AS_REGULAR_SECTION
-// LDC-LLVM >= 6.0.1:
-// On Mac, emit __debug_line section in __DWARF segment as regular (non-debug)
-// section, like DMD, to enable file/line infos in backtraces. See
+// LDC-LLVM >= 20:
+// On Darwin, emit __debug_line section in __DWARF segment as regular
+// (non-debug) section, like DMD, to enable file/line infos in backtraces
+// without having to resort to an atos process. See
+// https://github.com/ldc-developers/ldc/issues/4895
 // https://github.com/dlang/dmd/commit/2bf7d0db29416eacbb01a91e6502140e354ee0ef
-// https://github.com/ldc-developers/llvm-project/commit/110deda1bc1cf195983fea8c1107886057987955
+// https://github.com/ldc-developers/llvm-project/commit/356e996bd217afd883adf3da5fe9a16c1102b273
 static llvm::cl::opt<bool, true> preserveDwarfLineSection(
     "preserve-dwarf-line-section",
-    llvm::cl::desc("Mac: preserve DWARF line section during linking for "
-                   "file/line infos in backtraces. Defaults to true."),
+    llvm::cl::desc("Darwin: preserve DWARF __debug_line section during linking "
+                   "for builtin file/line infos in backtraces without having "
+                   "to resort to an atos process."),
     llvm::cl::Hidden, llvm::cl::ZeroOrMore,
     llvm::cl::location(ldc::emitMachODwarfLineAsRegularSection),
     llvm::cl::init(false));
@@ -441,7 +442,7 @@ createTargetMachine(const std::string targetTriple, const std::string arch,
                     FloatABI::Type &floatABI,
                     llvm::Optional<llvm::Reloc::Model> relocModel,
                     llvm::Optional<llvm::CodeModel::Model> codeModel,
-                    const llvm::CodeGenOpt::Level codeGenOptLevel,
+                    const llvm::CodeGenOptLevel codeGenOptLevel,
                     const bool noLinkerStripDead) {
   // Determine target triple. If the user didn't explicitly specify one, use
   // the one set at LLVM configure time.
@@ -463,14 +464,9 @@ createTargetMachine(const std::string targetTriple, const std::string arch,
       if (!envVersion.empty()) {
         osname += envVersion;
       } else {
-#if LDC_LLVM_VER >= 1400
         llvm::VersionTuple OSVersion;
         triple.getMacOSXVersion(OSVersion);
         osname += OSVersion.getAsString();
-#else
-        // Hardcode the version, because `getMacOSXVersion` is not available.
-        osname += "10.7";
-#endif
       }
 
       triple.setOSName(osname);
@@ -635,12 +631,14 @@ createTargetMachine(const std::string targetTriple, const std::string arch,
     targetOptions.DataSections = true;
   }
 
-  // On Android, we depend on a custom TLS emulation scheme implemented in our
-  // LLVM fork. LLVM 7+ enables regular emutls by default; prevent that.
+  // On Android, enforce native ELF TLS (supported since API level 29 = Android
+  // v10), as required by druntime. (Some older LLVM versions might default to
+  // EmuTLS).
   if (triple.getEnvironment() == llvm::Triple::Android) {
     targetOptions.EmulatedTLS = false;
 #if LDC_LLVM_VER < 1700
-    // Removed in this commit: https://github.com/llvm/llvm-project/commit/0d333bf0e3aa37e2e6ae211e3aa80631c3e01b85
+    // Removed in this commit:
+    // https://github.com/llvm/llvm-project/commit/0d333bf0e3aa37e2e6ae211e3aa80631c3e01b85
     targetOptions.ExplicitEmulatedTLS = true;
 #endif
   }
@@ -654,9 +652,15 @@ createTargetMachine(const std::string targetTriple, const std::string arch,
                     finalFeaturesString.c_str());
   }
 
-  return target->createTargetMachine(triple.str(), cpu, finalFeaturesString,
+  return target->createTargetMachine(
+#if LDC_LLVM_VER >= 2100
+                                     triple,
+#else
+                                     triple.str(),
+#endif
+                                     cpu, finalFeaturesString,
                                      targetOptions, relocModel, codeModel,
-                                     codeGenOptLevel);
+                                     static_cast<llvm::CodeGenOptLevel>(codeGenOptLevel));
 }
 
 ComputeBackend::Type getComputeTargetType(llvm::Module* m) {

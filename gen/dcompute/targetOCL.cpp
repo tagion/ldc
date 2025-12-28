@@ -24,20 +24,42 @@
 #include <string>
 
 // from SPIRVInternal.h
-#define SPIR_TARGETTRIPLE32 "spir-unknown-unknown"
-#define SPIR_TARGETTRIPLE64 "spir64-unknown-unknown"
-#define SPIR_DATALAYOUT32                                                      \
-  "e-p:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32"                             \
-  "-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32"                         \
-  "-v32:32:32-v48:64:64-v64:64:64-v96:128:128"                                 \
-  "-v128:128:128-v192:256:256-v256:256:256"                                    \
-  "-v512:512:512-v1024:1024:1024"
-#define SPIR_DATALAYOUT64                                                      \
-  "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32"                             \
-  "-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32"                         \
-  "-v32:32:32-v48:64:64-v64:64:64-v96:128:128"                                 \
-  "-v128:128:128-v192:256:256-v256:256:256"                                    \
-  "-v512:512:512-v1024:1024:1024"
+#if LDC_LLVM_VER < 1900
+#  define SPIR_TARGETTRIPLE32 "spir-unknown-unknown"
+#  define SPIR_TARGETTRIPLE64 "spir64-unknown-unknown"
+#  define SPIR_DATALAYOUT32                                                    \
+     "e-p:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32"                          \
+     "-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32"                      \
+     "-v32:32:32-v48:64:64-v64:64:64-v96:128:128"                              \
+     "-v128:128:128-v192:256:256-v256:256:256"                                 \
+     "-v512:512:512-v1024:1024:1024"
+#  define SPIR_DATALAYOUT64                                                    \
+     "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32"                          \
+     "-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32"                      \
+     "-v32:32:32-v48:64:64-v64:64:64-v96:128:128"                              \
+     "-v128:128:128-v192:256:256-v256:256:256"                                 \
+     "-v512:512:512-v1024:1024:1024"
+#else // LLVM 19+
+#  define SPIR_TARGETTRIPLE32 "spirv-unknown-unknown"
+#  define SPIR_TARGETTRIPLE64 "spirv64-unknown-unknown"
+#  if LDC_LLVM_VER < 2000
+#    define SPIR_DATALAYOUT32                                                  \
+       "e-p:32:32-i64:64-v16:16-v24:32-v32:32-v48:64"                          \
+       "-v96:128-v192:256-v256:256-v512:512-v1024:1024-G1"
+#    define SPIR_DATALAYOUT64                                                  \
+       "e-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128"                          \
+       "-v192:256-v256:256-v512:512-v1024:1024-G1"
+#  else // LLVM 20+
+#    define SPIR_DATALAYOUT32                                                  \
+       "e-p:32:32-i64:64-v16:16-v24:32-v32:32-v48:64"                          \
+       "-v96:128-v192:256-v256:256-v512:512-v1024:1024-n8:16:32:64-G1"
+#    define SPIR_DATALAYOUT64                                                  \
+       "e-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128"                          \
+       "-v192:256-v256:256-v512:512-v1024:1024-n8:16:32:64-G1"
+#  endif // LLVM 20+
+#endif // LLVM 19+
+
+using namespace dmd;
 
 namespace {
 class TargetOCL : public DComputeTarget {
@@ -51,14 +73,19 @@ public:
     const bool is64 = global.params.targetTriple->isArch64Bit();
 
     _ir = new IRState("dcomputeTargetOCL", ctx);
-    std::string targTriple = is64 ? SPIR_TARGETTRIPLE64
-                                  : SPIR_TARGETTRIPLE32;
+    std::string targTripleStr = is64 ? SPIR_TARGETTRIPLE64
+                                     : SPIR_TARGETTRIPLE32;
+#if LDC_LLVM_VER >= 2100
+    llvm::Triple targTriple = llvm::Triple(targTripleStr);
+#else
+    std::string targTriple = targTripleStr;
+#endif
     _ir->module.setTargetTriple(targTriple);
 
 #if LDC_LLVM_VER >= 1600
     auto floatABI = ::FloatABI::Hard;
     targetMachine = createTargetMachine(
-            targTriple,
+            targTripleStr,
             is64 ? "spirv64" : "spirv32",
             "", {},
             is64 ? ExplicitBitness::M64 : ExplicitBitness::M32, floatABI,
@@ -116,7 +143,7 @@ public:
       KernArgMD_name,
       count_KernArgMD
   };
-  void addKernelMetadata(FuncDeclaration *fd, llvm::Function *llf) override {
+  void addKernelMetadata(FuncDeclaration *fd, llvm::Function *llf, StructLiteralExp *_unused_) override {
     // By the time we get here the ABI should have rewritten the function
     // type so that the magic types in ldc.dcompute are transformed into
     // what the LLVM backend expects.
@@ -157,7 +184,6 @@ public:
       ss << "uchar";
     else if (ty == TY::Tvector) {
       TypeVector *vec = static_cast<TypeVector *>(t);
-      auto size = vec->size(Loc());
       auto basety = vec->basetype->ty;
       if (basety == TY::Tint8)
         ss << "char";
@@ -165,7 +191,7 @@ public:
         ss << "uchar";
       else
         ss << vec->basetype->toChars();
-      ss << (int)size;
+      ss << (int)size(vec);
     } else
       ss << t->toChars();
     return ss.str();

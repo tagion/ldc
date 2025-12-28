@@ -23,6 +23,8 @@
 #include "ir/irtypeaggr.h"
 #include "llvm/Analysis/ValueTracking.h"
 
+using namespace dmd;
+
 namespace {
 unsigned getVthisIdx(AggregateDeclaration *ad) {
   return getFieldGEPIndex(ad, ad->vthis);
@@ -30,7 +32,7 @@ unsigned getVthisIdx(AggregateDeclaration *ad) {
 
 bool isNRVOVar(VarDeclaration *vd) {
   if (auto fd = vd->toParent2()->isFuncDeclaration())
-    return fd->isNRVO() && vd == fd->nrvo_var && !fd->needsClosure();
+    return fd->isNRVO() && vd == fd->nrvo_var && !dmd::needsClosure(fd);
   return false;
 }
 
@@ -58,7 +60,7 @@ LLValue *indexVThis(AggregateDeclaration *ad,  LLValue* val) {
 
 static void DtoCreateNestedContextType(FuncDeclaration *fd);
 
-DValue *DtoNestedVariable(const Loc &loc, Type *astype, VarDeclaration *vd,
+DValue *DtoNestedVariable(Loc loc, Type *astype, VarDeclaration *vd,
                           bool byref) {
   IF_LOG Logger::println("DtoNestedVariable for %s @ %s", vd->toChars(),
                          loc.toChars());
@@ -80,7 +82,7 @@ DValue *DtoNestedVariable(const Loc &loc, Type *astype, VarDeclaration *vd,
   if (!fd) {
     error(loc, "function `%s` cannot access frame of function `%s`",
           irfunc->decl->toPrettyChars(), vdparent->toPrettyChars());
-    return new DLValue(astype, llvm::UndefValue::get(DtoPtrToType(astype)));
+    return new DLValue(astype, llvm::UndefValue::get(getOpaquePtrType()));
   }
 
   // is the nested variable in this scope?
@@ -126,28 +128,20 @@ DValue *DtoNestedVariable(const Loc &loc, Type *astype, VarDeclaration *vd,
   if (irLocal->nestedIndex == -1) {
     Logger::println(
         "WARNING: isn't actually nested, using invalid null storage");
-    auto llType = DtoPtrToType(astype);
-    if (isSpecialRefVar(vd))
-      llType = llType->getPointerTo();
-    return makeVarDValue(astype, vd, llvm::ConstantPointerNull::get(llType));
+    return makeVarDValue(astype, vd, getNullPtr());
   }
 
   ////////////////////////////////////
   // Extract variable from nested context
 
   assert(irfunc->frameType);
-  const auto pframeType = LLPointerType::getUnqual(irfunc->frameType);
   IF_LOG { Logger::cout() << "casting to: " << *irfunc->frameType << '\n'; }
-  LLValue *val = DtoBitCast(ctx, pframeType);
+  LLValue *val = ctx;
   llvm::StructType *currFrame = irfunc->frameType;
   // Make the DWARF variable address relative to the context pointer (ctx);
   // register all ops (offsetting, dereferencing) required to get there in the
   // following list.
-#if LDC_LLVM_VER >= 1400
   LLSmallVector<uint64_t, 4> dwarfAddrOps;
-#else
-  LLSmallVector<int64_t, 4> dwarfAddrOps;
-#endif
 
   const auto offsetToNthField = [&val, &dwarfAddrOps, &currFrame](unsigned fieldIndex,
                                                       const char *name = "") {
@@ -176,7 +170,7 @@ DValue *DtoNestedVariable(const Loc &loc, Type *astype, VarDeclaration *vd,
     IF_LOG Logger::cout() << "Frame index: " << *val << '\n';
     currFrame = getIrFunc(fd)->frameType;
     gIR->DBuilder.OpDeref(dwarfAddrOps);
-    val = DtoAlignedLoad(currFrame->getPointerTo(), val,
+    val = DtoAlignedLoad(LLPointerType::get(getGlobalContext(), 0), val,
                          (std::string(".frame.") + vdparent->toChars()).c_str());
     IF_LOG Logger::cout() << "Frame: " << *val << '\n';
   }
@@ -209,7 +203,7 @@ DValue *DtoNestedVariable(const Loc &loc, Type *astype, VarDeclaration *vd,
   return makeVarDValue(astype, vd, val);
 }
 
-void DtoResolveNestedContext(const Loc &loc, AggregateDeclaration *decl,
+void DtoResolveNestedContext(Loc loc, AggregateDeclaration *decl,
                              LLValue *value) {
   IF_LOG Logger::println("Resolving nested context");
   LOG_SCOPE;
@@ -230,11 +224,11 @@ void DtoResolveNestedContext(const Loc &loc, AggregateDeclaration *decl,
     unsigned idx = getVthisIdx(decl);
     llvm::StructType *st = getIrAggr(decl)->getLLStructType();
     LLValue *gep = DtoGEP(st, value, 0, idx, ".vthis");
-    DtoStore(DtoBitCast(nest, st->getElementType(idx)), gep);
+    DtoStore(nest, gep);
   }
 }
 
-LLValue *DtoNestedContext(const Loc &loc, Dsymbol *sym) {
+LLValue *DtoNestedContext(Loc loc, Dsymbol *sym) {
   IF_LOG Logger::println("DtoNestedContext for %s", sym->toPrettyChars());
   LOG_SCOPE;
 
@@ -257,7 +251,7 @@ LLValue *DtoNestedContext(const Loc &loc, Dsymbol *sym) {
     if (depth == -1 || (depth == 0 && !symfd->closureVars.empty())) {
       Logger::println("function does not have context or creates its own "
                       "from scratch, returning null");
-      return llvm::ConstantPointerNull::get(getVoidPtrType());
+      return getNullPtr();
     }
   }
 
@@ -299,7 +293,7 @@ LLValue *DtoNestedContext(const Loc &loc, Dsymbol *sym) {
           sym->toPrettyChars(), irFunc.decl->toPrettyChars());
       fatal();
     }
-    return llvm::ConstantPointerNull::get(getVoidPtrType());
+    return getNullPtr();
   }
 
   // The symbol may need a parent context of the current function.
@@ -345,7 +339,6 @@ LLValue *DtoNestedContext(const Loc &loc, Dsymbol *sym) {
           "Calling sibling function or directly nested function");
     } else {
       llvm::StructType *type = getIrFunc(ctxfd)->frameType;
-      val = DtoBitCast(val, LLPointerType::getUnqual(type));
       val = DtoGEP(type, val, 0, neededDepth);
       val = DtoAlignedLoad(type->getElementType(neededDepth),
           val, (std::string(".frame.") + frameToPass->toChars()).c_str());
@@ -424,7 +417,7 @@ static void DtoCreateNestedContextType(FuncDeclaration *fd) {
       builder.addType(innerFrameType->getElementType(i), target.ptrsize);
     }
     // Add frame pointer type for last frame
-    builder.addType(LLPointerType::getUnqual(innerFrameType), target.ptrsize);
+    builder.addType(LLPointerType::get(getGlobalContext(), 0), target.ptrsize);
   }
 
   // Add the direct nested variables of this function, and update their
@@ -437,7 +430,7 @@ static void DtoCreateNestedContextType(FuncDeclaration *fd) {
     LLType *t = nullptr;
     unsigned alignment = 0;
     if (captureByRef(vd)) {
-      t = DtoType(vd->type->pointerTo());
+      t = DtoType(pointerTo(vd->type));
       alignment = target.ptrsize;
     } else if (isParam && (vd->storage_class & STClazy)) {
       // the type is a delegate (LL struct)
@@ -494,7 +487,7 @@ void DtoCreateNestedContext(FuncGenState &funcGen) {
 
     // Create frame for current function and append to frames list
     LLValue *frame = nullptr;
-    bool needsClosure = fd->needsClosure();
+    bool needsClosure = dmd::needsClosure(fd);
     IF_LOG Logger::println("Needs closure (GC) flag: %d", (int)needsClosure);
     if (needsClosure) {
       LLFunction *fn =
@@ -505,14 +498,14 @@ void DtoCreateNestedContext(FuncGenState &funcGen) {
       LLValue *mem =
           gIR->CreateCallOrInvoke(fn, DtoConstSize_t(size), ".gc_frame");
       if (frameAlignment <= 16) {
-        frame = DtoBitCast(mem, frameType->getPointerTo(), ".frame");
+        frame = mem;
       } else {
         const uint64_t mask = frameAlignment - 1;
         mem = gIR->ir->CreatePtrToInt(mem, DtoSize_t());
         mem = gIR->ir->CreateAdd(mem, DtoConstSize_t(mask));
         mem = gIR->ir->CreateAnd(mem, DtoConstSize_t(~mask));
         frame =
-            gIR->ir->CreateIntToPtr(mem, frameType->getPointerTo(), ".frame");
+            gIR->ir->CreateIntToPtr(mem, LLPointerType::get(getGlobalContext(), 0), ".frame");
       }
     } else {
       frame = DtoRawAlloca(frameType, frameAlignment, ".frame");
@@ -531,14 +524,11 @@ void DtoCreateNestedContext(FuncGenState &funcGen) {
         src = indexVThis(ad, thisptr);
       }
       if (depth > 1) {
-        src = DtoBitCast(src, getVoidPtrType());
-        LLValue *dst = DtoBitCast(frame, getVoidPtrType());
-        DtoMemCpy(dst, src, DtoConstSize_t((depth - 1) * target.ptrsize),
-                  getABITypeAlign(getVoidPtrType()));
+        DtoMemCpy(frame, src, DtoConstSize_t((depth - 1) * target.ptrsize),
+                  getABITypeAlign(getOpaquePtrType()));
       }
       // Copy nestArg into framelist; the outer frame is not in the list of
       // pointers
-      src = DtoBitCast(src, frameType->getContainedType(depth - 1));
       LLValue *gep = DtoGEP(frameType, frame, 0, depth - 1);
       DtoAlignedStore(src, gep);
     }

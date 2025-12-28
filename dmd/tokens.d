@@ -3,12 +3,12 @@
  *
  * Specification: $(LINK2 https://dlang.org/spec/lex.html#tokens, Tokens)
  *
- * Copyright:   Copyright (C) 1999-2024 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2025 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 https://www.digitalmars.com, Walter Bright)
  * License:     $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
- * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/tokens.d, _tokens.d)
+ * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/compiler/src/dmd/tokens.d, _tokens.d)
  * Documentation:  https://dlang.org/phobos/dmd_tokens.html
- * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/src/dmd/tokens.d
+ * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/compiler/src/dmd/tokens.d
  */
 
 module dmd.tokens;
@@ -26,6 +26,9 @@ import dmd.root.utf;
 enum TOK : ubyte
 {
     reserved,
+
+    // if this list changes, update
+    // tokens.h, ../tests/cxxfrontend.cc and ../../test/unit/lexer/location_offset.d to match
 
     // Other
     leftParenthesis,
@@ -45,7 +48,6 @@ enum TOK : ubyte
     false_,
     throw_,
     new_,
-    delete_,
     variable,
     slice,
     version_,
@@ -124,6 +126,7 @@ enum TOK : ubyte
     // Leaf operators
     identifier,
     string_,
+    interpolated,
     hexadecimalString,
     this_,
     super_,
@@ -248,6 +251,7 @@ enum TOK : ubyte
     wchar_tLiteral,
     endOfLine,  // \n, \r, \u2028, \u2029
     whitespace,
+    rvalue,
 
     // C only keywords
     inline,
@@ -272,6 +276,7 @@ enum TOK : ubyte
     // C only extended keywords
     _assert,
     _import,
+    _module,
     __cdecl,
     __declspec,
     __stdcall,
@@ -380,6 +385,7 @@ enum EXP : ubyte
     // Leaf operators
     identifier,
     string_,
+    interpolated,
     this_,
     super_,
     halt,
@@ -423,6 +429,7 @@ enum EXP : ubyte
     interval,
 
     loweredAssignExp,
+    rvalue,
 }
 
 enum FirstCKeyword = TOK.inline;
@@ -430,8 +437,10 @@ enum FirstCKeyword = TOK.inline;
 // Assert that all token enum members have consecutive values and
 // that none of them overlap
 static assert(() {
-    foreach (idx, enumName; __traits(allMembers, TOK)) {
-       static if (idx != __traits(getMember, TOK, enumName)) {
+    foreach (idx, enumName; __traits(allMembers, TOK))
+    {
+       static if (idx != __traits(getMember, TOK, enumName))
+       {
            pragma(msg, "Error: Expected TOK.", enumName, " to be ", idx, " but is ", __traits(getMember, TOK, enumName));
            static assert(0);
        }
@@ -452,7 +461,6 @@ private immutable TOK[] keywords =
     TOK.false_,
     TOK.cast_,
     TOK.new_,
-    TOK.delete_,
     TOK.throw_,
     TOK.module_,
     TOK.pragma_,
@@ -554,6 +562,7 @@ private immutable TOK[] keywords =
     TOK.prettyFunction,
     TOK.shared_,
     TOK.immutable_,
+    TOK.rvalue,
 
     // C only keywords
     TOK.inline,
@@ -578,6 +587,7 @@ private immutable TOK[] keywords =
     // C only extended keywords
     TOK._assert,
     TOK._import,
+    TOK._module,
     TOK.__cdecl,
     TOK.__declspec,
     TOK.__stdcall,
@@ -613,7 +623,7 @@ static immutable TOK[TOK.max + 1] Ckeywords =
                        union_, unsigned, void_, volatile, while_, asm_, typeof_,
                        _Alignas, _Alignof, _Atomic, _Bool, _Complex, _Generic, _Imaginary, _Noreturn,
                        _Static_assert, _Thread_local,
-                       _import, __cdecl, __declspec, __stdcall, __thread, __pragma, __int128, __attribute__,
+                       _import, _module, __cdecl, __declspec, __stdcall, __thread, __pragma, __int128, __attribute__,
                        _assert ];
 
         foreach (kw; Ckwds)
@@ -623,6 +633,10 @@ static immutable TOK[TOK.max + 1] Ckeywords =
     }
 } ();
 
+struct InterpolatedSet {
+    // all strings in the parts are zero terminated at length+1
+    string[] parts;
+}
 
 /***********************************************************
  */
@@ -645,7 +659,11 @@ extern (C++) struct Token
 
         struct
         {
-            const(char)* ustring; // UTF8 string
+            union
+            {
+                const(char)* ustring; // UTF8 string
+                InterpolatedSet* interpolatedSet;
+            }
             uint len;
             ubyte postfix; // 'c', 'w', 'd'
         }
@@ -664,12 +682,12 @@ extern (C++) struct Token
         TOK.false_: "false",
         TOK.cast_: "cast",
         TOK.new_: "new",
-        TOK.delete_: "delete",
         TOK.throw_: "throw",
         TOK.module_: "module",
         TOK.pragma_: "pragma",
         TOK.typeof_: "typeof",
         TOK.typeid_: "typeid",
+        TOK.rvalue: "__rvalue",
         TOK.template_: "template",
         TOK.void_: "void",
         TOK.int8: "byte",
@@ -833,6 +851,7 @@ extern (C++) struct Token
         // For debugging
         TOK.error: "error",
         TOK.string_: "string",
+        TOK.interpolated: "interpolated string",
         TOK.onScopeExit: "scope(exit)",
         TOK.onScopeSuccess: "scope(success)",
         TOK.onScopeFailure: "scope(failure)",
@@ -883,6 +902,7 @@ extern (C++) struct Token
         // C only extended keywords
         TOK._assert       : "__check",
         TOK._import       : "__import",
+        TOK._module       : "__module",
         TOK.__cdecl        : "__cdecl",
         TOK.__declspec     : "__declspec",
         TOK.__stdcall      : "__stdcall",
@@ -910,6 +930,29 @@ nothrow:
         return 0;
     }
 
+    extern(D) void appendInterpolatedPart(const ref OutBuffer buf)
+    {
+        appendInterpolatedPart(cast(const(char)*)buf[].ptr, buf.length);
+    }
+
+    extern(D) void appendInterpolatedPart(const(char)[] str)
+    {
+        appendInterpolatedPart(str.ptr, str.length);
+    }
+
+    extern(D) void appendInterpolatedPart(const(char)* ptr, size_t length)
+    {
+        assert(value == TOK.interpolated);
+        if (interpolatedSet is null)
+            interpolatedSet = new InterpolatedSet;
+
+        auto s = cast(char*)mem.xmalloc_noscan(length + 1);
+        memcpy(s, ptr, length);
+        s[length] = 0;
+
+        interpolatedSet.parts ~= cast(string) s[0 .. length];
+    }
+
     /****
      * Set to contents of ptr[0..length]
      * Params:
@@ -918,6 +961,7 @@ nothrow:
      */
     void setString(const(char)* ptr, size_t length)
     {
+        value = TOK.string_;
         auto s = cast(char*)mem.xmalloc_noscan(length + 1);
         memcpy(s, ptr, length);
         s[length] = 0;
@@ -941,6 +985,7 @@ nothrow:
      */
     void setString()
     {
+        value = TOK.string_;
         ustring = "";
         len = 0;
         postfix = 0;
@@ -1138,7 +1183,7 @@ void writeCharLiteral(ref OutBuffer buf, dchar c)
             if (c <= 0xFF)
             {
                 if (isprint(c))
-                    buf.writeByte(c);
+                    buf.writeByte(cast(char)c);
                 else
                     buf.printf("\\x%02x", c);
             }

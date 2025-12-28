@@ -858,16 +858,16 @@ enum : WORD {
 }
 
 pure nothrow @nogc {
-    WORD MAKELANGID(/*USHORT*/uint p, /*USHORT*/ uint s) { return cast(WORD)((s << 10) | p); }
-    WORD PRIMARYLANGID(/*WORD*/uint lgid) { return cast(WORD)(lgid & 0x3FF); }
-    WORD SUBLANGID(/*WORD*/uint lgid) { return cast(WORD)(lgid >>> 10); }
+    WORD MAKELANGID()(/*USHORT*/uint p, /*USHORT*/ uint s) { return cast(WORD)((s << 10) | p); }
+    WORD PRIMARYLANGID()(/*WORD*/uint lgid) { return cast(WORD)(lgid & 0x3FF); }
+    WORD SUBLANGID()(/*WORD*/uint lgid) { return cast(WORD)(lgid >>> 10); }
 
-    DWORD MAKELCID(/*WORD*/uint lgid, /*WORD*/uint srtid) { return (cast(DWORD) srtid << 16) | cast(DWORD) lgid; }
+    DWORD MAKELCID()(/*WORD*/uint lgid, /*WORD*/uint srtid) { return (cast(DWORD) srtid << 16) | cast(DWORD) lgid; }
     // ???
-    //DWORD MAKESORTLCID(WORD lgid, WORD srtid, WORD ver) { return (MAKELCID(lgid, srtid)) | ((cast(DWORD)ver) << 20); }
-    WORD LANGIDFROMLCID(LCID lcid) { return cast(WORD) lcid; }
-    WORD SORTIDFROMLCID(LCID lcid) { return cast(WORD) ((lcid >>> 16) & 0x0F); }
-    WORD SORTVERSIONFROMLCID(LCID lcid) { return cast(WORD) ((lcid >>> 20) & 0x0F); }
+    //DWORD MAKESORTLCID()(WORD lgid, WORD srtid, WORD ver) { return (MAKELCID(lgid, srtid)) | ((cast(DWORD)ver) << 20); }
+    WORD LANGIDFROMLCID()(LCID lcid) { return cast(WORD) lcid; }
+    WORD SORTIDFROMLCID()(LCID lcid) { return cast(WORD) ((lcid >>> 16) & 0x0F); }
+    WORD SORTVERSIONFROMLCID()(LCID lcid) { return cast(WORD) ((lcid >>> 20) & 0x0F); }
 }
 
 enum WORD LANG_SYSTEM_DEFAULT = (SUBLANG_SYS_DEFAULT << 10) | LANG_NEUTRAL;
@@ -1131,7 +1131,8 @@ enum : WORD {
     IMAGE_FILE_MACHINE_MIPSFPU16 = 0x0466,
     IMAGE_FILE_MACHINE_EBC       = 0x0EBC,
     IMAGE_FILE_MACHINE_AMD64     = 0x8664,
-    IMAGE_FILE_MACHINE_M32R      = 0x9041
+    IMAGE_FILE_MACHINE_M32R      = 0x9041,
+    IMAGE_FILE_MACHINE_ARM64     = 0xAA64,
 }
 
 // ???
@@ -1555,8 +1556,8 @@ const TCHAR[]
 
 enum IMAGE_ORDINAL_FLAG32 = 0x80000000;
 
-ulong IMAGE_ORDINAL64(ulong Ordinal) { return Ordinal & 0xFFFF; }
-uint IMAGE_ORDINAL32(uint Ordinal)   { return Ordinal & 0xFFFF; }
+ulong IMAGE_ORDINAL64()(ulong Ordinal) { return Ordinal & 0xFFFF; }
+uint IMAGE_ORDINAL32()(uint Ordinal)   { return Ordinal & 0xFFFF; }
 
 bool IMAGE_SNAP_BY_ORDINAL32(uint Ordinal) {
     return (Ordinal & IMAGE_ORDINAL_FLAG32) != 0;
@@ -1919,10 +1920,10 @@ static if (_WIN32_WINNT >= 0x501) {
 }
 
 // Macros
-BYTE BTYPE(BYTE x) { return cast(BYTE) (x & N_BTMASK); }
-bool ISPTR(uint x) { return (x & N_TMASK) == (IMAGE_SYM_DTYPE_POINTER << N_BTSHFT); }
-bool ISFCN(uint x) { return (x & N_TMASK) == (IMAGE_SYM_DTYPE_FUNCTION << N_BTSHFT); }
-bool ISARY(uint x) { return (x & N_TMASK) == (IMAGE_SYM_DTYPE_ARRAY << N_BTSHFT); }
+BYTE BTYPE()(BYTE x) { return cast(BYTE) (x & N_BTMASK); }
+bool ISPTR()(uint x) { return (x & N_TMASK) == (IMAGE_SYM_DTYPE_POINTER << N_BTSHFT); }
+bool ISFCN()(uint x) { return (x & N_TMASK) == (IMAGE_SYM_DTYPE_FUNCTION << N_BTSHFT); }
+bool ISARY()(uint x) { return (x & N_TMASK) == (IMAGE_SYM_DTYPE_ARRAY << N_BTSHFT); }
 bool ISTAG(uint x) {
     return x == IMAGE_SYM_CLASS_STRUCT_TAG
         || x == IMAGE_SYM_CLASS_UNION_TAG
@@ -1932,7 +1933,7 @@ uint INCREF(uint x) {
     return ((x & ~N_BTMASK) << N_TSHIFT) | (IMAGE_SYM_DTYPE_POINTER << N_BTSHFT)
       | (x & N_BTMASK);
 }
-uint DECREF(uint x) { return ((x >>> N_TSHIFT) & ~N_BTMASK) | (x & N_BTMASK); }
+uint DECREF()(uint x) { return ((x >>> N_TSHIFT) & ~N_BTMASK) | (x & N_BTMASK); }
 
 enum DWORD TLS_MINIMUM_AVAILABLE = 64;
 
@@ -1948,9 +1949,9 @@ enum ULONG
 /*  Although these are semantically boolean, they are documented and
  *  implemented to return ULONG; this behaviour is preserved for compatibility
  */
-ULONG IsReparseTagMicrosoft(ULONG x)     { return x & 0x80000000; }
-ULONG IsReparseTagHighLatency(ULONG x)   { return x & 0x40000000; }
-ULONG IsReparseTagNameSurrogate(ULONG x) { return x & 0x20000000; }
+ULONG IsReparseTagMicrosoft()(ULONG x)     { return x & 0x80000000; }
+ULONG IsReparseTagHighLatency()(ULONG x)   { return x & 0x40000000; }
+ULONG IsReparseTagNameSurrogate()(ULONG x) { return x & 0x20000000; }
 
 bool IsReparseTagValid(ULONG x) {
     return !(x & ~IO_REPARSE_TAG_VALID_VALUES) && (x > IO_REPARSE_TAG_RESERVED_RANGE);
@@ -2257,6 +2258,51 @@ enum LEGACY_SAVE_AREA_LENGTH = XMM_SAVE_AREA32.sizeof;
         DWORD64 LastExceptionFromRip;
     }
 
+} else version(AArch64) {
+	enum CONTEXT_ARM64 = 0x400000;
+
+	enum CONTEXT_CONTROL         = (CONTEXT_ARM64 | 0x1L);
+	enum CONTEXT_INTEGER         = (CONTEXT_ARM64 | 0x2L);
+	enum CONTEXT_SEGMENTS        = (CONTEXT_ARM64 | 0x4L);
+	enum CONTEXT_FLOATING_POINT  = (CONTEXT_ARM64 | 0x8L);
+	enum CONTEXT_DEBUG_REGISTERS = (CONTEXT_ARM64 | 0x10L);
+
+    enum CONTEXT_FULL = (CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_FLOATING_POINT);
+    enum CONTEXT_ALL  = (CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS | CONTEXT_FLOATING_POINT | CONTEXT_DEBUG_REGISTERS);
+
+    enum ARM64_MAX_BREAKPOINTS = 8;
+    enum ARM64_MAX_WATCHPOINTS = 2;
+
+    union ARM64_NT_NEON128 {
+        struct {
+            ULONGLONG Low;
+            LONGLONG High;
+        };
+        double[2] D;
+        float[4] S;
+        WORD[8] H;
+        BYTE[16] B;
+    }
+    alias PARM64_NT_NEON128 = ARM64_NT_NEON128*;
+
+    align(16) struct CONTEXT
+    {
+        DWORD ContextFlags;
+        DWORD Cpsr;
+        DWORD64[31] X;
+        DWORD64 Sp;
+        DWORD64 Pc;
+
+        ARM64_NT_NEON128[32] V;
+        DWORD Fpcr;
+
+        DWORD Fpsr;
+
+        DWORD[ARM64_MAX_BREAKPOINTS] Bcr;
+        DWORD64[ARM64_MAX_BREAKPOINTS] Bvr;
+        DWORD[ARM64_MAX_WATCHPOINTS] Wcr;
+        DWORD64[ARM64_MAX_WATCHPOINTS] Wvr;
+    }
 } else {
     static assert(false, "Unsupported CPU");
     // Versions for PowerPC, Alpha, SHX, and MIPS removed.
@@ -3380,7 +3426,7 @@ struct IMAGE_RESOURCE_DIRECTORY_ENTRY {
 
     uint NameOffset()        { return Name & 0x7FFFFFFF; }
     bool NameIsString()      { return cast(bool)(Name & 0x80000000); }
-    uint OffsetToDirectory() { return OffsetToData & 0x7FFFFFFF; }
+    uint OffsetToDirectory()() { return OffsetToData & 0x7FFFFFFF; }
     bool DataIsDirectory()   { return cast(bool)(OffsetToData & 0x80000000); }
 
     uint NameOffset(uint n) {
@@ -3498,7 +3544,7 @@ struct IMAGE_CE_RUNTIME_FUNCTION_ENTRY {
 +/
     uint FuncLen()       { return (_bf >> 8) & 0x3FFFFF; }
     bool ThirtyTwoBit()  { return cast(bool)(_bf & 0x40000000); }
-    bool ExceptionFlag() { return cast(bool)(_bf & 0x80000000); }
+    bool ExceptionFlag()() { return cast(bool)(_bf & 0x80000000); }
 
     uint FuncLen(uint f) {
         _bf = (_bf & ~0x3FFFFF00) | ((f & 0x3FFFFF) << 8); return f & 0x3FFFFF;
@@ -3543,8 +3589,8 @@ struct FPO_DATA {
     ubyte cbRegs()  { return cast(ubyte)(_bf & 0x07); }
     bool fHasSEH()  { return cast(bool)(_bf & 0x08); }
     bool fUseBP()   { return cast(bool)(_bf & 0x10); }
-    bool reserved() { return cast(bool)(_bf & 0x20); }
-    ubyte cbFrame() { return cast(ubyte)(_bf >> 6); }
+    bool reserved()() { return cast(bool)(_bf & 0x20); }
+    ubyte cbFrame()() { return cast(ubyte)(_bf >> 6); }
 
     ubyte cbRegs(ubyte c) {
         _bf = cast(ubyte) ((_bf & ~0x07) | (c & 0x07));
@@ -4108,7 +4154,7 @@ struct PROCESSOR_POWER_POLICY_INFO {
     uint     _bf;
 
     bool AllowDemotion()  { return cast(bool)(_bf & 1); }
-    bool AllowPromotion() { return cast(bool)(_bf & 2); }
+    bool AllowPromotion()() { return cast(bool)(_bf & 2); }
 
     bool AllowDemotion(bool a)  { _bf = (_bf & ~1) | a; return a; }
     bool AllowPromotion(bool a) { _bf = (_bf & ~2) | (a << 1); return a; }

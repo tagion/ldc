@@ -1,12 +1,12 @@
 /**
  * Break down a D type into basic (register) types for the 32-bit x86 ABI.
  *
- * Copyright:   Copyright (C) 1999-2024 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2025 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 https://www.digitalmars.com, Walter Bright)
  * License:     $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
- * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/argtypes_x86.d, _argtypes_x86.d)
+ * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/compiler/src/dmd/argtypes_x86.d, _argtypes_x86.d)
  * Documentation:  https://dlang.org/phobos/dmd_argtypes_x86.html
- * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/src/dmd/argtypes_x86.d
+ * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/compiler/src/dmd/argtypes_x86.d
  */
 
 module dmd.argtypes_x86;
@@ -16,9 +16,10 @@ import core.checkedint;
 
 import dmd.astenums;
 import dmd.declaration;
-import dmd.globals;
+import dmd.dsymbolsem : isPOD;
 import dmd.location;
 import dmd.mtype;
+import dmd.typesem;
 import dmd.target;
 import dmd.visitor;
 
@@ -33,7 +34,7 @@ import dmd.visitor;
  *      A tuple of zero length means the type cannot be passed/returned in registers.
  *      null indicates a `void`.
  */
-extern (C++) TypeTuple toArgTypes_x86(Type t)
+TypeTuple toArgTypes_x86(Type t)
 {
     extern (C++) final class ToArgTypes : Visitor
     {
@@ -134,8 +135,7 @@ extern (C++) TypeTuple toArgTypes_x86(Type t)
             {
                 if (t2)
                     return twoTypes(t1, t2);
-                else
-                    return oneType(t1);
+                return oneType(t1);
             }
             else
                 return memory();
@@ -210,12 +210,12 @@ extern (C++) TypeTuple toArgTypes_x86(Type t)
             if (t1.ty == Tfloat32 && t2.ty == Tfloat32 && offset2 == 4)
                 return Type.tfloat64;
             // Merging floating and non-floating types produces the non-floating type
-            if (t1.isfloating())
+            if (t1.isFloating())
             {
-                if (!t2.isfloating())
+                if (!t2.isFloating())
                     t1 = mergeFloatToInt(t1);
             }
-            else if (t2.isfloating())
+            else if (t2.isFloating())
                 t2 = mergeFloatToInt(t2);
             Type t;
             // Pick type with larger size
@@ -326,7 +326,7 @@ extern (C++) TypeTuple toArgTypes_x86(Type t)
          *      nfields = number of fields in the aggregate (dimension for static arrays)
          *      getFieldInfo = get information about the nth field in the aggregate
          */
-        extern (D) void aggregate(uinteger_t sz, size_t nfields, Type delegate(size_t, out uint, out uint) getFieldInfo)
+        extern (D) void aggregate(ulong sz, size_t nfields, Type delegate(size_t, out uint, out uint) getFieldInfo)
         {
             if (nfields == 0)
                 return memory();

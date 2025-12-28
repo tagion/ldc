@@ -44,20 +44,14 @@
  * Copyright: Copyright Digital Mars 2015 - 2015.
  * License:   $(HTTP www.boost.org/LICENSE_1_0.txt, Boost License 1.0).
  * Authors:   Yazan Dabain, Sean Kelly
- * Source: $(DRUNTIMESRC rt/backtrace/dwarf.d)
+ * Source: $(DRUNTIMESRC core/internal/backtrace/dwarf.d)
  */
 
 module core.internal.backtrace.dwarf;
 
-import core.internal.execinfo;
+version (Posix):
+
 import core.internal.string;
-
-version (DRuntime_Use_Libunwind)
-    private enum hasLibunwind = true;
-else
-    private enum hasLibunwind = false;
-
-static if (hasExecinfo || hasLibunwind):
 
 version (OSX)
     version = Darwin;
@@ -293,6 +287,7 @@ version (Darwin) {
         import core.stdc.stdlib : exit;
         import core.sys.posix.stdio : fdopen;
         import core.sys.posix.unistd : close, dup2, execlp, fork, getpid, pipe;
+        import core.sys.posix.sys.wait : waitpid;
         // Create in/out pipes to communicate with the forked exec
         int[2] dummy_pipes; // these dummy pipes are there to prevent funny issues when stdin/stdout is closed and pipe returns id 0 or 1
         int[2] pipes_to_atos;
@@ -367,6 +362,7 @@ version (Darwin) {
         fclose(from_atos);
         close(write_to_atos);
         close(read_from_atos);
+        waitpid(child_id, null, 0);
     }
     private Location parseAtosLine(char* buffer) @nogc nothrow
     {
@@ -428,8 +424,6 @@ version (Darwin) {
  */
 void resolveAddresses(const(ubyte)[] debugLineSectionData, Location[] locations, size_t baseAddress) @nogc nothrow
 {
-    debug(DwarfDebugMachine) import core.stdc.stdio;
-
     size_t numberOfLocationsFound = 0;
 
     const(ubyte)[] dbg = debugLineSectionData;
@@ -1133,12 +1127,12 @@ LineNumberProgram readLineNumberProgram(ref const(ubyte)[] data) @nogc nothrow
         foreach (ref sf; lp.sourceFiles)
         {
             if (sf.dirIndex > lp.includeDirectories.length)
-                printf("\t- Out of bound directory! (%llu): %.*s\n",
+                printf("\t- Out of bound directory! (%zu): %.*s\n",
                        sf.dirIndex, cast(int) sf.file.length, sf.file.ptr);
             else if (sf.dirIndex > 0)
             {
                 const dir = lp.includeDirectories[sf.dirIndex - 1];
-                printf("\t- (Dir:%llu:%.*s/)%.*s\n", sf.dirIndex,
+                printf("\t- (Dir:%zu:%.*s/)%.*s\n", sf.dirIndex,
                        cast(int) dir.length, dir.ptr,
                        cast(int) sf.file.length, sf.file.ptr);
             }

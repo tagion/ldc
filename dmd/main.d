@@ -6,12 +6,12 @@
  * utilities needed for arguments parsing, path manipulation, etc...
  * This file is not shared with other compilers which use the DMD front-end.
  *
- * Copyright:   Copyright (C) 1999-2024 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2025 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 https://www.digitalmars.com, Walter Bright)
  * License:     $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
- * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/main.d, _main.d)
+ * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/compiler/src/dmd/main.d, _main.d)
  * Documentation:  https://dlang.org/phobos/dmd_main.html
- * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/src/dmd/main.d
+ * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/compiler/src/dmd/main.d
  */
 
 module dmd.main;
@@ -30,13 +30,14 @@ import dmd.compiler;
 import dmd.cond;
 import dmd.console;
 // IN_LLVM import dmd.cpreprocess;
+import dmd.deps;
 // IN_LLVM import dmd.dinifile;
 import dmd.dinterpret;
 // IN_LLVM import dmd.dmdparams;
 import dmd.dsymbolsem;
 import dmd.dtemplate;
 import dmd.dtoh;
-// IN_LLVM import dmd.glue : generateCodeAndWrite;
+// IN_LLVM import dmd.glue : generateCodeAndWrite, ObjcGlue_initialize;
 import dmd.dmodule;
 // IN_LLVM import dmd.dmsc : backend_init, backend_term;
 import dmd.doc;
@@ -55,6 +56,7 @@ import dmd.location;
 import dmd.mars;
 import dmd.mtype;
 import dmd.objc;
+// IN_LLVM import dmd.root.env;
 import dmd.root.file;
 import dmd.root.filename;
 import dmd.root.man;
@@ -62,9 +64,11 @@ import dmd.root.man;
 import dmd.root.rmem;
 import dmd.root.string;
 import dmd.root.stringtable;
+import dmd.root.array;
 import dmd.semantic2;
 import dmd.semantic3;
 import dmd.target;
+import dmd.timetrace;
 import dmd.utils;
 import dmd.vsoptions;
 
@@ -78,10 +82,8 @@ version (IN_LLVM)
     void codegenModules(ref Modules modules);
     // in driver/archiver.cpp
     int createStaticLibrary();
-    const(char)* getPathToProducedStaticLibrary();
     // in driver/linker.cpp
     int linkObjToBinary();
-    const(char)* getPathToProducedBinary();
     void deleteExeFile();
     int runProgram();
 }
@@ -97,7 +99,9 @@ version (IN_LLVM) {} else {
  *
  * Returns:
  * Return code of the application
- */ extern (C) int main(int argc, char** argv) {
+ */
+extern (C) int main(int argc, char** argv)
+{
     bool lowmem = false;
     foreach (i; 1 .. argc)
     {
@@ -109,7 +113,10 @@ version (IN_LLVM) {} else {
     }
     if (!lowmem)
     {
-        __gshared string[] disable_options = [ "gcopt=disable:1" ];
+        static if(__VERSION__ < 2085)
+            __gshared string[] disable_options = [ "gcopt=disable:1" ];
+        else
+            __gshared string[] disable_options = [ "gcopt=disable:1 cleanup:none" ];
         rt_options = disable_options;
         mem.disableGC();
     }
@@ -121,7 +128,9 @@ version (IN_LLVM) {} else {
  *
  * Returns:
  * Return code of the application
- */ extern (C) int _Dmain(char[][]) {
+ */
+extern (C) int _Dmain(char[][])
+{
     // possibly install memory error handler
     version (DigitalMars)
     {
@@ -130,25 +139,29 @@ version (IN_LLVM) {} else {
     import core.runtime;
     version(D_Coverage)
     {
-        // for now we need to manually set the source path
-        string dirName(string path, char separator)
+        // set the source path
+        string dirName(string path)
         {
             for (size_t i = path.length - 1; i > 0; i--)
             {
-                if (path[i] == separator)
+                if (isDirSeparator(path[i]))
                     return path[0..i];
             }
             return path;
         }
-        version (Windows)
-            enum sourcePath = dirName(dirName(dirName(__FILE_FULL_PATH__, '\\'), '\\'), '\\');
-        else
-            enum sourcePath = dirName(dirName(dirName(__FILE_FULL_PATH__, '/'), '/'), '/');
+        enum sourcePath = dirName(dirName(dirName(__FILE_FULL_PATH__)));
         dmd_coverSourcePath(sourcePath);
         dmd_coverDestPath(sourcePath);
         dmd_coverSetMerge(true);
     }
-    scope(failure) stderr.printInternalFailure;
+    version (D_Exceptions)
+        scope(failure)
+        {
+            OutBuffer buf;
+            printInternalFailure(buf);
+            fputs(buf.peekChars(), stderr);
+        }
+
     auto args = Runtime.cArgs();
     return tryMain(args.argc, cast(const(char)**)args.argv, global.params);
 }
@@ -168,23 +181,101 @@ private:
  * Params:
  *   argc = Number of arguments passed via command line
  *   argv = Array of string arguments passed via command line
+ *   params = set based on argc, argv
  *
  * Returns:
  *   Application return code
  */
-version (IN_LLVM) {} else
-private int tryMain(size_t argc, const(char)** argv, ref Param params)
+// LDC: changed from `private int tryMain(size_t argc, const(char)** argv, out Param params)`
+extern (C++) int mars_tryMain(ref Param params, ref Strings files)
+{
+    import dmd.common.charactertables;
+    import dmd.sarif;
+    import core.stdc.stdarg;
+
+version (IN_LLVM)
+{
+    Strings libmodules;
+}
+else
 {
     Strings files;
     Strings libmodules;
     global._init();
+}
+
+    scope(exit)
+    {
+        // If we are here then compilation has ended
+        // gracefully as opposed to with `fatal`
+        global.plugErrorSinks();
+
+        if (global.errors == 0 && global.params.v.messageStyle == MessageStyle.sarif)
+        {
+            generateSarifReport(true);
+        }
+    }
+
+version (IN_LLVM) {} else
+{
+    target.setTargetBuildDefaults();
 
     if (parseCommandlineAndConfig(argc, argv, params, files))
         return EXIT_FAILURE;
+}
 
-    global.compileEnv.previewIn        = global.params.previewIn;
-    global.compileEnv.ddocOutput       = global.params.ddoc.doOutput;
+    global.compileEnv.previewIn        = params.previewIn;
+    global.compileEnv.transitionIn     = params.v.vin;
+    global.compileEnv.ddocOutput       = params.ddoc.doOutput;
 
+    final switch(global.params.cIdentifierTable)
+    {
+        case CLIIdentifierTable.C99:
+            global.compileEnv.cCharLookupTable = IdentifierCharLookup.forTable(IdentifierTable.C99);
+            break;
+
+        case CLIIdentifierTable.C11:
+        case CLIIdentifierTable.default_:
+            // ImportC is defined against C11, not C23.
+            // If it was C23 this needs to be changed to UAX31 instead.
+            global.compileEnv.cCharLookupTable = IdentifierCharLookup.forTable(IdentifierTable.C11);
+            break;
+
+        case CLIIdentifierTable.UAX31:
+            global.compileEnv.cCharLookupTable = IdentifierCharLookup.forTable(IdentifierTable.UAX31);
+            break;
+
+        case CLIIdentifierTable.All:
+            global.compileEnv.cCharLookupTable = IdentifierCharLookup.forTable(IdentifierTable.LR);
+            break;
+    }
+
+    final switch(global.params.dIdentifierTable)
+    {
+        case CLIIdentifierTable.C99:
+            global.compileEnv.dCharLookupTable = IdentifierCharLookup.forTable(IdentifierTable.C99);
+            break;
+
+        case CLIIdentifierTable.C11:
+            global.compileEnv.dCharLookupTable = IdentifierCharLookup.forTable(IdentifierTable.C11);
+            break;
+
+        case CLIIdentifierTable.UAX31:
+            global.compileEnv.dCharLookupTable = IdentifierCharLookup.forTable(IdentifierTable.UAX31);
+            break;
+
+        case CLIIdentifierTable.All:
+        case CLIIdentifierTable.default_:
+            // @@@DEPRECATED_2.119@@@
+            // Change the default to UAX31,
+            //  this is a breaking change as C99 (what D used for ~23 years),
+            //  has characters that are not in UAX31.
+            global.compileEnv.dCharLookupTable = IdentifierCharLookup.forTable(IdentifierTable.LR);
+            break;
+    }
+
+version (IN_LLVM) {} else
+{
     if (params.help.usage)
     {
         usage();
@@ -196,12 +287,8 @@ private int tryMain(size_t argc, const(char)** argv, ref Param params)
         logo();
         return EXIT_SUCCESS;
     }
-
-    return mars_mainBody(params, files, libmodules);
 }
 
-extern (C++) int mars_mainBody(ref Param params, ref Strings files, ref Strings libmodules)
-{
     /*
     Prints a supplied usage text to the console and
     returns the exit code for the help usage page.
@@ -222,6 +309,18 @@ extern (C++) int mars_mainBody(ref Param params, ref Strings files, ref Strings 
     {
         error(Loc.initial, "warnings are treated as errors");
         errorSupplemental(Loc.initial, "Use -wi if you wish to treat warnings only as informational.");
+    }
+
+    // In case deprecation messages were omitted, inform the user about it
+    static void mentionOmittedDeprecations()
+    {
+        if (global.params.v.errorLimit != 0 &&
+            global.deprecations > global.params.v.errorLimit)
+        {
+            const omitted = global.deprecations - global.params.v.errorLimit;
+            message(Loc.initial, "%d deprecation warning%s omitted, use `-verrors=0` to show all",
+                omitted, omitted == 1 ? "".ptr : "s".ptr);
+        }
     }
 
     /*
@@ -307,12 +406,13 @@ version (IN_LLVM) {} else
     {
         fatal();
     }
-    if (files.length == 0)
+    if (files.length == 0 && !params.readStdin)
     {
         if (params.jsonFieldFlags)
         {
             Modules modules;            // empty
-            generateJson(modules);
+            if (generateJson(modules, global.errorSink))
+                fatal();
             return EXIT_SUCCESS;
         }
 version (IN_LLVM)
@@ -334,7 +434,7 @@ version (IN_LLVM)
 }
 else
 {
-    setDefaultLibrary(params, target);
+    setDefaultLibraries(target, driverParams.defaultlibname, driverParams.debuglibname);
 }
 
     // Initialization
@@ -344,6 +444,7 @@ else
     Module._init();
     Expression._init();
     Objc._init();
+    Loc._init();
 
     reconcileLinkRunLib(params, files.length, target.obj_ext);
     version(CRuntime_Microsoft)
@@ -362,37 +463,53 @@ version (IN_LLVM) {} else
 
     if (params.v.verbose)
     {
-        stdout.printPredefinedVersions();
+        OutBuffer buf;
+        printPredefinedVersions(buf);
 version (IN_LLVM)
 {
         // LDC prints binary/version/config before entering this function.
 }
 else
 {
-        stdout.printGlobalConfigs();
+        printGlobalConfig(buf);
 }
+        fputs(buf.peekChars(), stdout);
     }
     //printf("%d source files\n", cast(int) files.length);
 
     // Build import search path
 
-    static Strings* buildPath(Strings* imppath)
+    static void buildImportPath(ref Array!ImportPathInfo imppath, ref Array!ImportPathInfo result, ref Strings pathsOnlyResult)
     {
-        Strings* result = null;
-        if (imppath)
+        Array!ImportPathInfo array;
+        Strings pathsOnlyArray;
+
+        foreach (entry; imppath)
         {
-            foreach (const path; *imppath)
+            int sink(const(char)* p) nothrow
             {
-                Strings* a = FileName.splitPath(path);
-                if (a)
-                {
-                    if (!result)
-                        result = new Strings();
-                    result.append(a);
-                }
+                ImportPathInfo temp = entry;
+                temp.path = p;
+                array.push(temp);
+                return 0;
             }
+
+            FileName.splitPath(&sink, entry.path);
+            FileName.appendSplitPath(entry.path, pathsOnlyArray);
         }
-        return result;
+
+        result.append(&array);
+        pathsOnlyResult.append(&pathsOnlyArray);
+    }
+
+    static void buildFileImportPath(ref Strings imppath, ref Strings result)
+    {
+        Strings array;
+        foreach (const path; imppath)
+        {
+            FileName.appendSplitPath(path, array);
+        }
+        result.append(&array);
     }
 
     if (params.mixinOut.doOutput)
@@ -401,11 +518,27 @@ else
         atexit(&flushMixins); // see comment for flushMixins
     }
     scope(exit) flushMixins();
-    global.path = buildPath(params.imppath);
-    global.filePath = buildPath(params.fileImppath);
+    buildImportPath(params.imppath, global.path, global.importPaths);
+    buildFileImportPath(params.fileImppath, global.filePath);
+
+    if (params.timeTrace)
+    {
+        import dmd.timetrace;
+version (IN_LLVM)
+{
+        initializeTimeTrace(params.timeTraceGranularityUs, params.argv0.toCString.ptr);
+}
+else
+{
+        initializeTimeTrace(params.timeTraceGranularityUs, argv[0]);
+}
+    }
 
     // Create Modules
-    Modules modules = createModules(files, libmodules, target);
+    Modules modules;
+    if (createModules(files, libmodules, params, target, global.errorSink, modules))
+        fatal();
+
     // Read files
     foreach (m; modules)
     {
@@ -418,22 +551,24 @@ else
     /* Read ddoc macro files named by the DDOCFILE environment variable and command line
      * and concatenate the text into ddocbuf
      */
-    void readDdocFiles(ref const Loc loc, ref const Strings ddocfiles, ref OutBuffer ddocbuf)
+    void readDdocFiles(Loc loc, ref const Strings ddocfiles, ref OutBuffer ddocbuf)
     {
         foreach (file; ddocfiles)
         {
-            auto buffer = readFile(loc, file.toDString());
+            if (readFile(loc, file.toDString(), ddocbuf))
+                fatal();
             // BUG: convert file contents to UTF-8 before use
-            const data = buffer.data;
-            //printf("file: '%.*s'\n", cast(int)data.length, data.ptr);
-            ddocbuf.write(data);
+            //printf("file: '%.*s'\n", cast(int)buffer.data.length, buffer.data.ptr);
         }
         ddocbufIsRead = true;
     }
 
-    // Parse files
     bool anydocfiles = false;
     OutBuffer ddocOutputText;
+    {
+    // Parse files
+    timeTraceBeginEvent(TimeTraceEventType.parseGeneral);
+    scope (exit) timeTraceEndEvent(TimeTraceEventType.parseGeneral);
     size_t filecount = modules.length;
     for (size_t filei = 0, modi = 0; filei < filecount; filei++, modi++)
     {
@@ -451,8 +586,6 @@ version (IN_LLVM) {} else
 
         m.parse();
 
-version (IN_LLVM)
-{
         // Finalize output filenames. Update if `-oq` was specified (only feasible after parsing).
         if (params.fullyQualifiedObjectFiles && m.md)
         {
@@ -463,6 +596,8 @@ version (IN_LLVM)
                 m.hdrfile = m.setOutfilename(params.dihdr.name, params.dihdr.dir, m.arg, hdr_ext);
         }
 
+version (IN_LLVM)
+{
         // Set object filename in params.objfiles.
         for (size_t j = 0; j < params.objfiles.length; j++)
         {
@@ -521,6 +656,7 @@ version (IN_LLVM)
                 driverParams.link = false;
         }
     }
+    }
 
     if (anydocfiles && modules.length && (driverParams.oneobj || params.objname))
     {
@@ -554,6 +690,10 @@ version (IN_LLVM)
     if (global.errors)
         removeHdrFilesAndFail(params, modules);
 
+    {
+    timeTraceBeginEvent(TimeTraceEventType.semaGeneral);
+    scope (exit) timeTraceEndEvent(TimeTraceEventType.semaGeneral);
+
     // load all unconditional imports for better symbol resolving
     foreach (m; modules)
     {
@@ -566,7 +706,7 @@ version (IN_LLVM)
 
 version (IN_LLVM) {} else
 {
-    backend_init();
+    backend_init(params, driverParams, target);
 }
 
     // Do semantic analysis
@@ -578,7 +718,7 @@ version (IN_LLVM) {} else
     }
     //if (global.errors)
     //    fatal();
-    Module.runDeferredSemantic();
+    runDeferredSemantic();
     if (Module.deferred.length)
     {
         for (size_t i = 0; i < Module.deferred.length; i++)
@@ -596,7 +736,7 @@ version (IN_LLVM) {} else
             message("semantic2 %s", m.toChars());
         m.semantic2(null);
     }
-    Module.runDeferredSemantic2();
+    runDeferredSemantic2();
     if (global.errors)
         removeHdrFilesAndFail(params, modules);
 
@@ -621,7 +761,7 @@ version (IN_LLVM) {} else
             modules.push(m);
         }
     }
-    Module.runDeferredSemantic3();
+    runDeferredSemantic3();
     if (global.errors)
         removeHdrFilesAndFail(params, modules);
 
@@ -638,13 +778,16 @@ else
         {
             if (params.v.verbose)
                 message("inline scan %s", m.toChars());
-            inlineScanModule(m);
+            inlineScanModule(m, global.errorSink);
         }
     }
 }
 
     if (global.warnings)
         errorOnWarning();
+
+    if (global.params.useDeprecated == DiagnosticReporting.inform)
+        mentionOmittedDeprecations();
 
     // Do not attempt to generate output files if errors or warnings occurred
     if (global.errors || global.warnings)
@@ -656,7 +799,7 @@ else
     {
         foreach (i; 1 .. modules[0].aimports.length)
             semantic3OnDependencies(modules[0].aimports[i]);
-        Module.runDeferredSemantic3();
+        runDeferredSemantic3();
 
         const data = (*ob)[];
         if (params.moduleDeps.name)
@@ -672,14 +815,16 @@ version (IN_LLVM)
         else
             printf("%.*s", cast(int)data.length, data.ptr);
     }
+    }
 
     printCtfePerformanceStats();
-    printTemplateStats();
+    printTemplateStats(global.params.v.templatesListInstances, global.errorSink);
 
     // Generate output files
     if (params.json.doOutput)
     {
-        generateJson(modules);
+        if (generateJson(modules, global.errorSink))
+            fatal();
     }
     if (!global.errors && params.ddoc.doOutput)
     {
@@ -711,7 +856,7 @@ version (IN_LLVM)
     }
 
     if (global.params.cxxhdr.doOutput)
-        genCppHdrFiles(modules);
+        genCppHdrFiles(modules, global.errorSink);
 
     if (global.errors)
         fatal();
@@ -752,11 +897,16 @@ version (IN_LLVM)
 
     codegenModules(modules);
 }
-else
+else // !IN_LLVM
 {
-    generateCodeAndWrite(modules[], libmodules[], params.libname, params.objdir,
-                         driverParams.lib, params.obj, driverParams.oneobj, params.multiobj,
-                         params.v.verbose);
+    {
+        ObjcGlue_initialize();
+        timeTraceBeginEvent(TimeTraceEventType.codegenGlobal);
+        scope (exit) timeTraceEndEvent(TimeTraceEventType.codegenGlobal);
+        generateCodeAndWrite(modules[], libmodules[], params.libname, params.objdir,
+                            driverParams.lib, params.obj, driverParams.oneobj, params.multiobj,
+                            params.v.verbose);
+    }
 
     backend_term();
 } // !IN_LLVM
@@ -793,22 +943,28 @@ version (IN_LLVM)
 else // !IN_LLVM
 {
         if (driverParams.link)
-            status = runLINK();
+        {
+            timeTraceBeginEvent(TimeTraceEventType.link);
+            scope (exit) timeTraceEndEvent(TimeTraceEventType.link);
+            status = runLINK(global.params.v.verbose, global.errorSink);
+        }
 }
         if (params.run)
         {
             if (!status)
             {
-                status = runProgram();
-                /* Delete .obj files and .exe file
-                 */
 version (IN_LLVM)
 {
+                status = runProgram();
                 // object files already deleted above
                 deleteExeFile();
 }
 else
 {
+                restoreEnvVars();
+                status = runProgram(global.params.exefile, global.params.runargs[], global.params.v.verbose, global.errorSink);
+                /* Delete .obj files and .exe file
+                 */
                 foreach (m; modules)
                 {
                     m.deleteObjFile();
@@ -821,9 +977,59 @@ else
         }
     }
 
+    if (params.timeTrace)
+    {
+        import dmd.timetrace;
+        auto fileName = params.timeTraceFile.toDString();
+        if (!fileName)
+        {
+            if (global.params.objfiles.length)
+            {
+                fileName = global.params.objfiles[0].toDString() ~ ".time-trace";
+            }
+            else
+            {
+                fileName = "out.time-trace";
+            }
+        }
+
+        OutBuffer buf;
+        timeTraceProfiler.writeToBuffer(buf);
+        if (fileName == "-")
+        {
+            // Write to stdout
+            import core.stdc.stdio : fwrite, stdout;
+
+            size_t n = fwrite(buf[].ptr, 1, buf.length, stdout);
+            if (n != buf.length)
+            {
+                error(Loc.initial, "Error writing -ftime-trace profile to stdout");
+            }
+        }
+        else if (!File.write(fileName, buf[]))
+        {
+            error(Loc.initial,
+                "Error writing -ftime-trace profile: could not open '%*.s'",
+                cast(int) fileName.length, fileName.ptr);
+        }
+
+        deinitializeTimeTrace();
+    }
+
     // Output the makefile dependencies
     if (params.makeDeps.doOutput)
-        emitMakeDeps(params);
+    {
+        OutBuffer buf;
+        writeMakeDeps(buf, params, driverParams.link, driverParams.lib, target.lib_ext);
+        const data = buf[];
+        if (params.makeDeps.name)
+        {
+            if (!writeFile(Loc.initial, params.makeDeps.name, data))
+                fatal();
+        }
+        else
+            printf("%.*s", cast(int) data.length, data.ptr);
+    }
 
     if (global.warnings)
         errorOnWarning();
@@ -842,10 +1048,10 @@ else
  *   argv = Array of string arguments passed via command line
  *   params = parameters from argv
  *   files = files from argv
- * Returns: true on faiure
+ * Returns: true on failure
  */
 version (IN_LLVM) {} else
-bool parseCommandlineAndConfig(size_t argc, const(char)** argv, ref Param params, ref Strings files)
+bool parseCommandlineAndConfig(size_t argc, const(char)** argv, out Param params, ref Strings files)
 {
     // Detect malformed input
     static bool badArgs()
@@ -868,7 +1074,7 @@ bool parseCommandlineAndConfig(size_t argc, const(char)** argv, ref Param params
         error(Loc.initial, "cannot open response file '%s'", missingFile);
     //for (size_t i = 0; i < arguments.length; ++i) printf("arguments[%d] = '%s'\n", i, arguments[i]);
     // Set default values
-    params.argv0 = arguments[0].toDString;
+    auto argv0 = arguments[0].toDString;
 
     version (Windows)
         enum iniName = "sc.ini";
@@ -887,11 +1093,13 @@ bool parseCommandlineAndConfig(size_t argc, const(char)** argv, ref Param params
     }
     else
     {
-        global.inifilename = findConfFile(params.argv0, iniName);
+        global.inifilename = findConfFile(argv0, iniName);
     }
     // Read the configuration file
-    const iniReadResult = File.read(global.inifilename);
-    const inifileBuffer = iniReadResult.buffer.data;
+    OutBuffer inifileBuffer;
+    File.read(global.inifilename, inifileBuffer);
+    inifileBuffer.writeByte(0);         // ensure sentinel
+
     /* Need path of configuration file, for use in expanding @P macro
      */
     const(char)[] inifilepath = FileName.path(global.inifilename);
@@ -902,9 +1110,10 @@ bool parseCommandlineAndConfig(size_t argc, const(char)** argv, ref Param params
      * pick up any DFLAGS settings.
      */
     sections.push("Environment");
-    parseConfFile(environment, global.inifilename, inifilepath, inifileBuffer, &sections);
+    if (parseConfFile(environment, global.inifilename, inifilepath, cast(ubyte[])inifileBuffer[], &sections))
+        return true;
 
-    const(char)[] arch = target.isX86_64 ? "64" : "32"; // use default
+    const(char)[] arch = (target.isX86_64 || target.isAArch64) ? "64" : "32"; // use default
     arch = parse_arch_arg(&arguments, arch);
 
     // parse architecture from DFLAGS read from [Environment] section
@@ -918,19 +1127,19 @@ bool parseCommandlineAndConfig(size_t argc, const(char)** argv, ref Param params
     bool isX86_64 = arch[0] == '6';
 
     version(Windows) // delete LIB entry in [Environment] (necessary for optlink) to allow inheriting environment for MS-COFF
-    if (arch != "32omf")
         environment.update("LIB", 3).value = null;
 
     // read from DFLAGS in [Environment{arch}] section
     char[80] envsection = void;
     snprintf(envsection.ptr, envsection.length, "Environment%.*s", cast(int) arch.length, arch.ptr);
     sections.push(envsection.ptr);
-    parseConfFile(environment, global.inifilename, inifilepath, inifileBuffer, &sections);
+    if (parseConfFile(environment, global.inifilename, inifilepath, cast(ubyte[])inifileBuffer[], &sections))
+        return true;
     getenv_setargv(readFromEnv(environment, "DFLAGS"), &arguments);
     updateRealEnvironment(environment);
     environment.reset(1); // don't need environment cache any more
 
-    if (parseCommandLine(arguments, argc, params, files, target))
+    if (parseCommandLine(arguments, argc, params, files, target, driverParams, global.errorSink))
     {
         Loc loc;
         errorSupplemental(loc, "run `dmd` to print the compiler manual");
@@ -942,7 +1151,7 @@ bool parseCommandlineAndConfig(size_t argc, const(char)** argv, ref Param params
     if (char* p = getenv("DDOCFILE"))
         global.params.ddoc.files.shift(p);
 
-    if (target.isX86_64 != isX86_64)
+    if (target.isX86_64 != isX86_64 && !target.isAArch64)
         error(Loc.initial, "the architecture must not be changed in the %s section of %.*s",
               envsection.ptr, cast(int)global.inifilename.length, global.inifilename.ptr);
 
@@ -950,73 +1159,6 @@ bool parseCommandlineAndConfig(size_t argc, const(char)** argv, ref Param params
     return false;
 }
 
-/// Emit the makefile dependencies for the -makedeps switch
-void emitMakeDeps(ref Param params)
-{
-    assert(params.makeDeps.doOutput);
-
-    OutBuffer buf;
-
-    // start by resolving and writing the target (which is sometimes resolved during link phase)
-    if (IN_LLVM && driverParams.link)
-    {
-        buf.writeEscapedMakePath(getPathToProducedBinary());
-    }
-    else if (IN_LLVM && driverParams.lib)
-    {
-        buf.writeEscapedMakePath(getPathToProducedStaticLibrary());
-    }
-    /* IN_LLVM: handled above
-    else if (driverParams.link && params.exefile)
-    {
-        buf.writeEscapedMakePath(&params.exefile[0]);
-    }
-    else if (driverParams.lib)
-    {
-        const(char)[] libname = params.libname ? params.libname : FileName.name(params.objfiles[0].toDString);
-        libname = FileName.forceExt(libname,target.lib_ext);
-
-        buf.writeEscapedMakePath(&libname[0]);
-    }
-    */
-    else if (params.objname)
-    {
-        buf.writeEscapedMakePath(&params.objname[0]);
-    }
-    else if (params.objfiles.length)
-    {
-        buf.writeEscapedMakePath(params.objfiles[0]);
-        foreach (of; params.objfiles[1 .. $])
-        {
-            buf.writestring(" ");
-            buf.writeEscapedMakePath(of);
-        }
-    }
-    else
-    {
-        assert(false, "cannot resolve makedeps target");
-    }
-
-    buf.writestring(":");
-
-    // then output every dependency
-    foreach (dep; params.makeDeps.files)
-    {
-        buf.writestringln(" \\");
-        buf.writestring("  ");
-        buf.writeEscapedMakePath(dep);
-    }
-    buf.writenl();
-
-    const data = buf[];
-    if (params.makeDeps.name)
-    {
-        if (!writeFile(Loc.initial, params.makeDeps.name, data))
-            fatal();
-    }
-    else
-        printf("%.*s", cast(int) data.length, data.ptr);
-}
 
 // in druntime:
 alias MainFunc = extern(C) int function(char[][] args);
@@ -1093,8 +1235,6 @@ else
     }
     else
     {
-        if (target.omfobj)
-            error(Loc.initial, "`-m32omf` can only be used when targetting windows");
         if (driverParams.mscrtlib)
             error(Loc.initial, "`-mscrtlib` can only be used when targetting windows");
     }

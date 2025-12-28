@@ -34,6 +34,8 @@
 #include "ir/irvar.h"
 #include "llvm/ADT/SmallString.h"
 
+using namespace dmd;
+
 //////////////////////////////////////////////////////////////////////////////
 
 class CodegenVisitor : public Visitor {
@@ -105,6 +107,12 @@ public:
     // Emit any members (e.g. final functions).
     for (auto m : *decl->members) {
       m->accept(this);
+    }
+
+    // Objective-C protocols don't have TypeInfo.
+    if (decl->classKind == ClassKind::objc) {
+      gIR->objc.getProtocol(decl);
+      return;
     }
 
     // Emit TypeInfo.
@@ -203,6 +211,12 @@ public:
       m->accept(this);
     }
 
+    // Objective-C class structure is initialized by calling getClassRef.
+    if (decl->classKind == ClassKind::objc) {
+      gIR->objc.getClass(decl);
+      return;
+    }
+
     IrClass *ir = getIrAggr(decl);
 
     ir->getInitSymbol(/*define=*/true);
@@ -239,9 +253,8 @@ public:
                            decl->toPrettyChars());
     LOG_SCOPE;
 
-    if (decl->ir->isDefined()) {
+    if (decl->ir->isDefined())
       return;
-    }
 
     if (decl->type->ty == TY::Terror) {
       error(decl->loc, "%s `%s` had semantic errors when compiling",
@@ -250,23 +263,31 @@ public:
       return;
     }
 
-    DtoResolveVariable(decl);
-    decl->ir->setDefined();
-
     // just forward aliases
     if (decl->aliasTuple) {
       Logger::println("aliasTuple");
-      decl->toAlias()->accept(this);
+      toAlias(decl)->accept(this);
+      return;
+    }
+
+    if (!decl->canTakeAddressOf()) {
+      Logger::println("manifest constant, skipping");
       return;
     }
 
     // global variable
     if (decl->isDataseg()) {
-      Logger::println("data segment");
+      // skip external declarations (IR-declared lazily)
+      if (decl->storage_class & STCextern) {
+        Logger::println("external global, skipping");
+        return;
+      }
 
-      assert(!(decl->storage_class & STCmanifest) &&
-             "manifest constant being codegen'd!");
+      Logger::println("global variable");
       assert(!irs->dcomputetarget);
+
+      DtoResolveVariable(decl);
+      decl->ir->setDefined();
 
       getIrGlobal(decl)->getValue(/*define=*/true);
     }
@@ -325,9 +346,9 @@ public:
     // is sufficient. Speculative ones are lazily emitted if actually referenced
     // during codegen - per IR module.
     if ((global.params.linkonceTemplates == LinkonceTemplates::aggressive &&
-         decl->isDiscardable()) ||
+         isDiscardable(decl)) ||
         (global.params.linkonceTemplates != LinkonceTemplates::aggressive &&
-         !decl->needsCodegen())) {
+         !needsCodegen(decl))) {
       Logger::println("Does not need codegen, skipping.");
       return;
     }
@@ -368,7 +389,7 @@ public:
   //////////////////////////////////////////////////////////////////////////
 
   void visit(AttribDeclaration *decl) override {
-    Dsymbols *d = decl->include(nullptr);
+    Dsymbols *d = include(decl, nullptr);
 
     if (d) {
       for (auto s : *d) {
@@ -390,6 +411,11 @@ public:
 
   void visit(PragmaDeclaration *decl) override {
     const auto &triple = *global.params.targetTriple;
+
+#if LDC_LLVM_VER >= 1800
+    #define endswith ends_with
+    #define startswith starts_with
+#endif
 
     if (decl->ident == Id::lib) {
       assert(!irs->dcomputetarget);
@@ -464,12 +490,28 @@ public:
       }
     }
     visit(static_cast<AttribDeclaration *>(decl));
+
+#if LDC_LLVM_VER >= 1800
+    #undef endswith
+    #undef startswith
+#endif
   }
 
   //////////////////////////////////////////////////////////////////////////
 
   void visit(TypeInfoDeclaration *decl) override {
     llvm_unreachable("Should be emitted from codegen layer only");
+  }
+
+  //////////////////////////////////////////////////////////////////////////
+
+  void visit(CAsmDeclaration *ad) override {
+    auto se = ad->code->isStringExp();
+    assert(se);
+
+    DString str = se->peekString();
+    if (str.length)
+      irs->module.appendModuleInlineAsm({str.ptr, str.length});
   }
 };
 

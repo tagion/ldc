@@ -23,6 +23,8 @@
 #include "gen/recursivevisitor.h"
 #include "gen/uda.h"
 
+using namespace dmd;
+
 namespace {
 
 /// An ASTVisitor that checks whether the number of statements is larger than a
@@ -156,7 +158,7 @@ bool defineAsExternallyAvailable(FuncDeclaration &fdecl) {
 
   IF_LOG Logger::println("Potential inlining candidate");
 
-  if (fdecl.semanticRun < PASS::semantic3) {
+  if (fdecl.semanticRun() < PASS::semantic3) {
     IF_LOG Logger::println("Do semantic analysis");
     LOG_SCOPE
 
@@ -166,8 +168,8 @@ bool defineAsExternallyAvailable(FuncDeclaration &fdecl) {
     global.gaggedForInlining = true;
 
     bool semantic_error = false;
-    if (fdecl.functionSemantic3()) {
-      Module::runDeferredSemantic3();
+    if (functionSemantic3(&fdecl)) {
+      runDeferredSemantic3();
     } else {
       IF_LOG Logger::println("Failed functionSemantic3.");
       semantic_error = true;
@@ -178,7 +180,7 @@ bool defineAsExternallyAvailable(FuncDeclaration &fdecl) {
       IF_LOG Logger::println("Errors occured during semantic analysis.");
       return false;
     }
-    assert(fdecl.semanticRun >= PASS::semantic3done);
+    assert(fdecl.semanticRun() >= PASS::semantic3done);
   }
 
   // FuncDeclaration::naked is set by the AsmParser during semantic3 analysis,

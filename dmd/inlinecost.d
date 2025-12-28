@@ -1,12 +1,12 @@
 /**
  * Compute the cost of inlining a function call by counting expressions.
  *
- * Copyright:   Copyright (C) 1999-2024 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2025 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 https://www.digitalmars.com, Walter Bright)
  * License:     $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
- * Source:    $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/inlinecost.d, _inlinecost.d)
+ * Source:    $(LINK2 https://github.com/dlang/dmd/blob/master/compiler/src/dmd/inlinecost.d, _inlinecost.d)
  * Documentation:  https://dlang.org/phobos/dmd_inlinecost.html
- * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/src/dmd/inlinecost.d
+ * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/compiler/src/dmd/inlinecost.d
  */
 
 module dmd.inlinecost;
@@ -24,18 +24,18 @@ import dmd.dmodule;
 import dmd.dscope;
 import dmd.dstruct;
 import dmd.dsymbol;
+import dmd.dsymbolsem : toAlias;
 import dmd.expression;
 import dmd.func;
-import dmd.globals;
 import dmd.id;
 import dmd.identifier;
 import dmd.init;
 import dmd.mtype;
 import dmd.opover;
-import dmd.postordervisitor;
 import dmd.statement;
 import dmd.tokens;
 import dmd.visitor;
+import dmd.visitor.postorder;
 
 enum COST_MAX = 250;
 
@@ -213,7 +213,7 @@ public:
                     s3.endsWithReturnStatement()
                    )
                 {
-                    if (ifs.prm)       // if variables are declared
+                    if (ifs.param)       // if variables are declared
                     {
                         cost = COST_MAX;
                         return;
@@ -258,7 +258,7 @@ public:
         /* Can't declare variables inside ?: expressions, so
          * we cannot inline if a variable is declared.
          */
-        if (s.prm)
+        if (s.param)
         {
             cost = COST_MAX;
             return;
@@ -430,7 +430,7 @@ public:
     {
         //printf("NewExp.inlineCost3() %s\n", e.toChars());
         AggregateDeclaration ad = isAggregate(e.newtype);
-        if (ad && ad.isNested())
+        if (ad && ad.isNested() || e.placement)
             cost = COST_MAX;
         else
             cost++;
@@ -506,7 +506,7 @@ public:
     {
         //printf("CallExp.inlineCost3() %s\n", toChars());
         // in LDC, we only use the inliner for default arguments
-        static if (IN_LLVM)
+        version (IN_LLVM)
             cost++;
         // https://issues.dlang.org/show_bug.cgi?id=3500
         // super.func() calls must be devirtualized, and the inliner

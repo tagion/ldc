@@ -11,19 +11,14 @@
 
 module rt.dwarfeh;
 
+version (Posix):
+
 // debug = EH_personality;
-version (Posix)
-    version = PosixWASI;
-else version (WASI)
-    version = PosixWASI;
 
-//version (Posix):
-version (PosixWASI):
-
-import rt.dmain2: _d_print_throwable;
 import core.internal.backtrace.unwind;
-import core.stdc.stdio;
-import core.stdc.stdlib;
+import core.stdc.stdio : fprintf, printf, stderr;
+import core.stdc.stdlib : abort, calloc, free;
+import rt.dmain2 : _d_print_throwable;
 
 version (LDC)
 {
@@ -146,7 +141,8 @@ debug (EH_personality)
 {
     private void writeln(in char* format, ...) @nogc nothrow
     {
-        import core.stdc.stdarg;
+        import core.stdc.stdarg : va_list, va_start;
+        import core.stdc.stdio : fflush, stdout, vfprintf;
 
         va_list args;
         va_start(args, format);
@@ -202,7 +198,7 @@ struct ExceptionHeader
         auto eh = &ehstorage;
         if (eh.object)                  // if in use
         {
-            eh = cast(ExceptionHeader*)core.stdc.stdlib.calloc(ExceptionHeader.sizeof, 1);
+            eh = cast(ExceptionHeader*).calloc(1, ExceptionHeader.sizeof);
             if (!eh)
                 terminate(__LINE__);              // out of memory while throwing - not much else can be done
         }
@@ -225,7 +221,7 @@ struct ExceptionHeader
          */
         *eh = ExceptionHeader.init;
         if (eh != &ehstorage)
-            core.stdc.stdlib.free(eh);
+            .free(eh);
     }
 
     /*************************
@@ -485,7 +481,7 @@ version (ARM_EABI_UNWINDER)
         UNWIND_POINTER_REG = 12,
         UNWIND_STACK_REG = 13
     }
-
+    
     extern (C) _Unwind_Reason_Code _d_eh_personality(_Unwind_State state,
                    _Unwind_Exception* exceptionObject, _Unwind_Context* context)
     {
@@ -573,7 +569,7 @@ extern (C) _Unwind_Reason_Code _d_eh_personality_common(_Unwind_Action actions,
         {
             auto eh = ExceptionHeader.toExceptionHeader(exceptionObject);
             for (auto ehx = eh; ehx; ehx = ehx.next)
-                writeln(" eh: %p next=%014p lsda=%p '%.*s'", ehx, ehx.next, ehx.languageSpecificData, ehx.object.msg.length, ehx.object.msg.ptr);
+                writeln(" eh: %p next=%014p lsda=%p '%.*s'", ehx, ehx.next, ehx.languageSpecificData, cast(int) ehx.object.msg.length, ehx.object.msg.ptr);
         }
     }
 
@@ -666,7 +662,7 @@ extern (C) _Unwind_Reason_Code _d_eh_personality_common(_Unwind_Action actions,
     if (exceptionClass == dmdExceptionClass)
     {
         auto eh = ExceptionHeader.toExceptionHeader(exceptionObject);
-        debug (EH_personality) writeln(" '%.*s' next = %p", eh.object.msg.length, eh.object.msg.ptr, eh.next);
+        debug (EH_personality) writeln(" '%.*s' next = %p", cast(int) eh.object.msg.length, eh.object.msg.ptr, eh.next);
         auto currentLsd = language_specific_data;
         bool bypassed = false;
         while (eh.next)
@@ -1220,14 +1216,13 @@ int actionTableLookup(_Unwind_Exception* exceptionObject, uint actionRecordPtr, 
         ClassInfo ci = cast(ClassInfo)cast(void*)(entry);
         if (typeid(ci) is typeid(__cpp_type_info_ptr))
         {
-            version (CppRuntime_Gcc)
+            version (CppRuntime_GNU)
             {
                 if (exceptionClass == cppExceptionClass || exceptionClass == cppExceptionClass1)
                 {
                     // sti is catch clause type_info
                     auto sti = cast(CppTypeInfo)((cast(__cpp_type_info_ptr)cast(void*)ci).ptr);
-                    auto p = getCppPtrToThrownObject(exceptionObject, sti);
-                    if (p) // if found
+                    if (auto p = getCppPtrToThrownObject(exceptionObject, sti)) // if found
                     {
                         auto eh = CppExceptionHeader.toExceptionHeader(exceptionObject);
                         eh.thrownPtr = p;                   // for __cxa_begin_catch()
@@ -1266,7 +1261,7 @@ void terminate(uint line) @nogc
 
 /****************************** C++ Support *****************************/
 
-version (CppRuntime_Gcc)
+version (CppRuntime_GNU)
 {
     enum _Unwind_Exception_Class cppExceptionClass =
             (cast(_Unwind_Exception_Class)'G' << 56) |

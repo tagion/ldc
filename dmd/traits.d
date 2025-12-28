@@ -3,12 +3,12 @@
  *
  * Specification: $(LINK2 https://dlang.org/spec/traits.html, Traits)
  *
- * Copyright:   Copyright (C) 1999-2024 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2025 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 https://www.digitalmars.com, Walter Bright)
  * License:     $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
- * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/traits.d, _traits.d)
+ * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/compiler/src/dmd/traits.d, _traits.d)
  * Documentation:  https://dlang.org/phobos/dmd_traits.html
- * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/src/dmd/traits.d
+ * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/compiler/src/dmd/traits.d
  */
 
 module dmd.traits;
@@ -20,12 +20,12 @@ import dmd.arraytypes;
 import dmd.astcodegen;
 import dmd.astenums;
 import dmd.attrib;
+import dmd.attribsem;
 import dmd.canthrow;
 import dmd.dclass;
 import dmd.declaration;
 import dmd.dimport;
 import dmd.dinterpret;
-import dmd.dmangle;
 import dmd.dmodule;
 import dmd.dscope;
 import dmd.dsymbol;
@@ -36,11 +36,13 @@ import dmd.errorsink;
 import dmd.expression;
 import dmd.expressionsem;
 import dmd.func;
+import dmd.funcsem;
 import dmd.globals;
 import dmd.hdrgen;
 import dmd.id;
 import dmd.identifier;
 import dmd.location;
+import dmd.mangle : decoToType;
 import dmd.mtype;
 import dmd.nogc;
 import dmd.optimize;
@@ -49,6 +51,7 @@ import dmd.root.array;
 import dmd.root.speller;
 import dmd.root.stringtable;
 import dmd.target;
+import dmd.templatesem : TemplateInstance_semanticTiargs, TemplateInstanceBox;
 import dmd.tokens;
 import dmd.typesem;
 import dmd.visitor;
@@ -336,7 +339,9 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
         const save = sc.stc;
         if (e.ident == Id.isDeprecated)
             sc.stc |= STC.deprecated_;
-        if (!TemplateInstance.semanticTiargs(e.loc, sc, e.args, 1))
+        Scope* sc2 = sc.startCTFE();
+        scope(exit) { sc2.endCTFE(); }
+        if (!TemplateInstance_semanticTiargs(e.loc, sc2, e.args, 1))
         {
             sc.stc = save;
             return ErrorExp.get();
@@ -442,23 +447,23 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
 
     if (e.ident == Id.isArithmetic)
     {
-        return isTypeX(t => t.isintegral() || t.isfloating());
+        return isTypeX(t => t.isIntegral() || t.isFloating());
     }
     if (e.ident == Id.isFloating)
     {
-        return isTypeX(t => t.isfloating());
+        return isTypeX(t => t.isFloating());
     }
     if (e.ident == Id.isIntegral)
     {
-        return isTypeX(t => t.isintegral());
+        return isTypeX(t => t.isIntegral());
     }
     if (e.ident == Id.isScalar)
     {
-        return isTypeX(t => t.isscalar());
+        return isTypeX(t => t.isScalar());
     }
     if (e.ident == Id.isUnsigned)
     {
-        return isTypeX(t => t.isunsigned());
+        return isTypeX(t => t.isUnsigned());
     }
     if (e.ident == Id.isAssociativeArray)
     {
@@ -466,7 +471,7 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
     }
     if (e.ident == Id.isDeprecated)
     {
-        if (isTypeX(t => t.iscomplex() || t.isimaginary()).toBool().hasValue(true))
+        if (isTypeX(t => t.isComplex() || t.isImaginary()).toBool().hasValue(true))
             return True();
         return isDsymX(t => t.isDeprecated());
     }
@@ -480,13 +485,19 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
     }
     if (e.ident == Id.isAbstractClass)
     {
-        return isTypeX(t => t.toBasetype().isTypeClass() &&
-                            t.toBasetype().isTypeClass().sym.isAbstract());
+        return isTypeX((t)
+        {
+            auto c = t.toBasetype().isTypeClass();
+            return c && c.sym.isAbstract();
+        });
     }
     if (e.ident == Id.isFinalClass)
     {
-        return isTypeX(t => t.toBasetype().isTypeClass() &&
-                            (t.toBasetype().isTypeClass().sym.storage_class & STC.final_) != 0);
+        return isTypeX((t)
+        {
+            const c = t.toBasetype().isTypeClass();
+            return c && (c.sym.storage_class & STC.final_) != 0;
+        });
     }
     if (e.ident == Id.isTemplate)
     {
@@ -499,6 +510,17 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
                 return false;
             return overloadApply(s,
                 sm => sm.isTemplateDeclaration() !is null) != 0;
+        });
+    }
+    if (e.ident == Id.isBitfield)
+    {
+        if (dim != 1)
+            return dimError(1);
+
+        return isDsymX((s)
+        {
+            s = s.toAlias();
+            return s.isBitFieldDeclaration() !is null;
         });
     }
     if (e.ident == Id.isPOD)
@@ -523,7 +545,9 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
         }
         return True();
     }
-    if (e.ident == Id.hasCopyConstructor || e.ident == Id.hasPostblit)
+    if (e.ident == Id.hasCopyConstructor ||
+        e.ident == Id.hasMoveConstructor ||
+        e.ident == Id.hasPostblit)
     {
         if (dim != 1)
             return dimError(1);
@@ -541,8 +565,14 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
         auto ts = tb.isTypeStruct();
         if (auto sd = ts ? ts.sym : null)
         {
-            return (e.ident == Id.hasPostblit) ? (sd.postblit ? True() : False())
-                 : (sd.hasCopyCtor ? True() : False());
+            bool result;
+            if (e.ident == Id.hasPostblit)
+                result = sd.postblit !is null;
+            else if (e.ident == Id. hasCopyConstructor)
+                result = sd.hasCopyCtor;
+            else
+                result = sd.hasMoveCtor;
+            return result ? True() : False();
         }
         return False();
     }
@@ -680,6 +710,25 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
 
         return isDeclX(d => (d.storage_class & STC.lazy_) != 0);
     }
+    if (e.ident == Id.isCOMClass)
+    {
+        if (dim != 1)
+            return dimError(1);
+
+        auto o = (*e.args)[0];
+        auto s = getDsymbol(o);
+        AggregateDeclaration agg;
+
+        if (!s || ((agg = s.isAggregateDeclaration()) is null))
+        {
+            error(e.loc, "argument to `__traits(isCOMClass, %s)` is not a declaration", o.toChars());
+            return ErrorExp.get();
+        }
+
+        if (ClassDeclaration cd = agg.isClassDeclaration())
+            return cd.com ? True() : False();
+        return False();
+    }
     if (e.ident == Id.identifier)
     {
         // Get identifier for symbol as a string literal
@@ -687,7 +736,7 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
          * a symbol should not be folded to a constant.
          * Bit 1 means don't convert Parameter to Type if Parameter has an identifier
          */
-        if (!TemplateInstance.semanticTiargs(e.loc, sc, e.args, 2))
+        if (!TemplateInstance_semanticTiargs(e.loc, sc, e.args, 2))
             return ErrorExp.get();
         if (dim != 1)
             return dimError(1);
@@ -723,8 +772,10 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
             return dimError(1);
 
         Scope* sc2 = sc.push();
-        sc2.flags = sc.flags | SCOPE.noaccesscheck | SCOPE.ignoresymbolvisibility;
-        bool ok = TemplateInstance.semanticTiargs(e.loc, sc2, e.args, 1);
+        sc2.copyFlagsFrom(sc);
+        sc2.noAccessCheck = true;
+        sc2.ignoresymbolvisibility = true;
+        bool ok = TemplateInstance_semanticTiargs(e.loc, sc2, e.args, 1);
         sc2.pop();
         if (!ok)
             return ErrorExp.get();
@@ -753,14 +804,53 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
         return se.expressionSemantic(sc);
 
     }
+    if (e.ident == Id.getBitfieldOffset || e.ident == Id.getBitfieldWidth)
+    {
+        if (dim != 1)
+            return dimError(1);
+
+        auto o = (*e.args)[0];
+        auto s = getDsymbolWithoutExpCtx(o);
+        if (!s)
+        {
+            error(e.loc, "bitfield symbol expected not `%s`", o.toChars());
+            return ErrorExp.get();
+        }
+
+        auto vd = s.toAlias.isVarDeclaration();
+        if (!vd || !(vd.storage_class & STC.field))
+        {
+            error(e.loc, "bitfield symbol expected not %s `%s`", s.kind, s.toPrettyChars);
+            return ErrorExp.get();
+        }
+
+        uint fieldWidth;
+        uint bitOffset;
+        if (auto bf = vd.isBitFieldDeclaration())
+        {
+            fieldWidth = bf.fieldWidth;
+            bitOffset  = bf.bitOffset;
+        }
+        else // just a regular field
+        {
+            const sz = size(vd.type);
+            assert(sz < uint.max / 8);    // overflow check
+            fieldWidth = cast(uint)sz * 8;
+            bitOffset  = 0;
+        }
+        uint value = e.ident == Id.getBitfieldOffset ? bitOffset : fieldWidth;
+        return new IntegerExp(e.loc, value, Type.tuns32);
+    }
     if (e.ident == Id.getProtection || e.ident == Id.getVisibility)
     {
         if (dim != 1)
             return dimError(1);
 
         Scope* sc2 = sc.push();
-        sc2.flags = sc.flags | SCOPE.noaccesscheck | SCOPE.ignoresymbolvisibility;
-        bool ok = TemplateInstance.semanticTiargs(e.loc, sc2, e.args, 1);
+        sc2.copyFlagsFrom(sc);
+        sc2.noAccessCheck = true;
+        sc2.ignoresymbolvisibility = true;
+        bool ok = TemplateInstance_semanticTiargs(e.loc, sc2, e.args, 1);
         sc2.pop();
         if (!ok)
             return ErrorExp.get();
@@ -990,7 +1080,8 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
     doSemantic:
         // ignore symbol visibility and disable access checks for these traits
         Scope* scx = sc.push();
-        scx.flags |= SCOPE.ignoresymbolvisibility | SCOPE.noaccesscheck;
+        scx.ignoresymbolvisibility = true;
+        scx.noAccessCheck = true;
         scope (exit) scx.pop();
 
         if (e.ident == Id.hasMember)
@@ -1012,7 +1103,7 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
                  e.ident == Id.getVirtualMethods ||
                  e.ident == Id.getOverloads)
         {
-            uint errors = global.errors;
+            const errors = global.errors;
             Expression eorig = ex;
             ex = ex.expressionSemantic(scx);
             if (errors < global.errors)
@@ -1091,37 +1182,36 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
                 auto fd = s.isFuncDeclaration();
                 if (!fd)
                 {
-                    if (includeTemplates)
+                    if (!includeTemplates)
+                        return 0;
+                    auto td = s.isTemplateDeclaration();
+                    if (!td)
+                        return 0;
+                    // if td is part of an overload set we must take a copy
+                    // which shares the same `instances` cache but without
+                    // `overroot` and `overnext` set to avoid overload
+                    // behaviour in the result.
+                    if (td.overnext !is null)
                     {
-                        if (auto td = s.isTemplateDeclaration())
+                        if (td.instances is null)
                         {
-                            // if td is part of an overload set we must take a copy
-                            // which shares the same `instances` cache but without
-                            // `overroot` and `overnext` set to avoid overload
-                            // behaviour in the result.
-                            if (td.overnext !is null)
-                            {
-                                if (td.instances is null)
-                                {
-                                    // create an empty AA just to copy it
-                                    scope ti = new TemplateInstance(Loc.initial, Id.empty, null);
-                                    auto tib = TemplateInstanceBox(ti);
-                                    td.instances[tib] = null;
-                                    td.instances.clear();
-                                }
-                                td = td.syntaxCopy(null);
-                                import core.stdc.string : memcpy;
-                                memcpy(cast(void*) td, cast(void*) s,
-                                        __traits(classInstanceSize, TemplateDeclaration));
-                                td.overroot = null;
-                                td.overnext = null;
-                            }
-
-                            auto e = ex ? new DotTemplateExp(Loc.initial, ex, td)
-                                        : new DsymbolExp(Loc.initial, td);
-                            exps.push(e);
+                            // create an empty AA just to copy it
+                            scope ti = new TemplateInstance(Loc.initial, Id.empty, null);
+                            auto tib = TemplateInstanceBox(ti);
+                            td.instances[tib] = null;
+                            td.instances.clear();
                         }
+                        td = td.syntaxCopy(null);
+                        import core.stdc.string : memcpy;
+                        memcpy(cast(void*) td, cast(void*) s,
+                                __traits(classInstanceSize, TemplateDeclaration));
+                        td.overroot = null;
+                        td.overnext = null;
                     }
+
+                    auto e = ex ? new DotTemplateExp(Loc.initial, ex, td)
+                                : new DsymbolExp(Loc.initial, td);
+                    exps.push(e);
                     return 0;
                 }
                 if (e.ident == Id.getVirtualFunctions && !fd.isVirtual())
@@ -1214,7 +1304,7 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
          * a symbol should not be folded to a constant.
          * Bit 1 means don't convert Parameter to Type if Parameter has an identifier
          */
-        if (!TemplateInstance.semanticTiargs(e.loc, sc, e.args, 3))
+        if (!TemplateInstance_semanticTiargs(e.loc, sc, e.args, 3))
             return ErrorExp.get();
 
         if (dim != 1)
@@ -1244,7 +1334,7 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
             // @@@DEPRECATION 2.100.2
             if (auto td = s.isTemplateDeclaration())
             {
-                if (td.overnext || td.overroot)
+                if (td.overnext)
                 {
                     deprecation(e.loc, "`__traits(getAttributes)` may only be used for individual functions, not the overload set `%s`", td.ident.toChars());
                     deprecationSupplemental(e.loc, "the result of `__traits(getOverloads)` may be used to select the desired function to extract attributes from");
@@ -1306,7 +1396,7 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
         // attribute inference.
         if (fd && fd.parent && fd.parent.isTemplateInstance)
         {
-            fd.functionSemantic3();
+            functionSemantic3(fd);
             tf = fd.type.isTypeFunction();
         }
 
@@ -1433,7 +1523,7 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
         if (!fparams.parameters)
             return ErrorExp.get();
 
-        StorageClass stc;
+        STC stc;
 
         // Set stc to storage class of the ith parameter
         auto ex = isExpression((*e.args)[1]);
@@ -1720,11 +1810,15 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
 
         foreach (o; *e.args)
         {
-            uint errors = global.startGagging();
+            const errors = global.startGagging();
             Scope* sc2 = sc.push();
             sc2.tinst = null;
             sc2.minst = null;   // this is why code for these are not emitted to object file
-            sc2.flags = (sc.flags & ~(SCOPE.ctfe | SCOPE.condition)) | SCOPE.compile | SCOPE.fullinst;
+            sc2.copyFlagsFrom(sc);
+            sc2.ctfe = false;
+            sc2.condition = false;
+            sc2.traitsCompiles = true;
+            sc2.fullinst = true;
 
             bool err = false;
 
@@ -1751,9 +1845,9 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
                 if (sc2.func && sc2.func.type.isTypeFunction())
                 {
                     const tf = sc2.func.type.isTypeFunction();
-                    err |= tf.isnothrow && canThrow(ex, sc2.func, null);
+                    err |= tf.isNothrow && canThrow(ex, sc2.func, null);
                 }
-                ex = checkGC(sc2, ex);
+                ex = ex.checkGC(sc2);
                 if (ex.op == EXP.error)
                     err = true;
             }
@@ -1788,9 +1882,9 @@ Expression semanticTraits(TraitsExp e, Scope* sc)
         ob1.push((*e.args)[0]);
         Objects ob2;
         ob2.push((*e.args)[1]);
-        if (!TemplateInstance.semanticTiargs(e.loc, sc, &ob1, 0))
+        if (!TemplateInstance_semanticTiargs(e.loc, sc, &ob1, 0))
             return ErrorExp.get();
-        if (!TemplateInstance.semanticTiargs(e.loc, sc, &ob2, 0))
+        if (!TemplateInstance_semanticTiargs(e.loc, sc, &ob2, 0))
             return ErrorExp.get();
         if (ob1.length != ob2.length)
             return False();
@@ -1969,9 +2063,9 @@ version (IN_LLVM)
             return dimError(1);
         auto arg0 = (*e.args)[0];
         Dsymbol s = getDsymbolWithoutExpCtx(arg0);
-        if (!s || !s.loc.isValid())
+        if (!s || !s.loc.isValid() || s.isModule())
         {
-            error(e.loc, "can only get the location of a symbol, not `%s`", arg0.toChars());
+            error(e.loc, "can only get the location of a symbol, not `%s`", s ? s.toPrettyChars() : arg0.toChars());
             return ErrorExp.get();
         }
 

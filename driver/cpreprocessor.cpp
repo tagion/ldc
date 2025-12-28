@@ -1,51 +1,36 @@
 #include "driver/cpreprocessor.h"
 
 #include "dmd/errors.h"
+#include "dmd/timetrace.h"
 #include "driver/cl_options.h"
-#include "driver/timetrace.h"
 #include "driver/tool.h"
+#include "gen/irstate.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Program.h"
+#include "llvm/MC/MCSubtargetInfo.h"
+#include "llvm/Target/TargetMachine.h"
 
 namespace {
-const char *getPathToImportc_h(const Loc &loc) {
+const char *getPathToImportc_h(Loc loc) {
   // importc.h should be next to object.d
   static const char *cached = nullptr;
   if (!cached) {
-    cached = FileName::searchPath(global.path, "importc.h", false);
+    cached = FileName::searchPath(global.importPaths, "importc.h", false);
     if (!cached) {
       error(loc, "cannot find \"importc.h\" along import path");
       fatal();
     }
-  }
-  return cached;
-}
 
-const std::string &getCC(bool isMSVC) {
-  static std::string cached;
-  if (cached.empty()) {
-    std::string fallback = "cc";
-    if (isMSVC) {
 #ifdef _WIN32
-      // by default, prefer clang-cl.exe (if in PATH) over cl.exe
-      // (e.g., no echoing of source filename being preprocessed to stderr)
-      auto found = llvm::sys::findProgramByName("clang-cl.exe");
-      if (found) {
-        fallback = found.get();
-      } else {
-        fallback = "cl.exe";
-      }
-#else
-      fallback = "clang-cl";
+    // if the path to importc.h is relative, cl.exe (but not clang-cl) treats it as relative to the .c file!
+    cached = FileName::toAbsolute(cached);
 #endif
-    }
-    cached = getGcc(fallback.c_str());
   }
   return cached;
 }
 
-FileName getOutputPath(const Loc &loc, const char *csrcfile) {
+FileName getOutputPath(Loc loc, const char *csrcfile) {
   llvm::SmallString<64> buffer;
 
   // 1) create a new temporary directory (e.g., `/tmp/itmp-ldc-10ecec`)
@@ -67,9 +52,8 @@ FileName getOutputPath(const Loc &loc, const char *csrcfile) {
 }
 } // anonymous namespace
 
-FileName runCPreprocessor(FileName csrcfile, const Loc &loc, bool &ifile,
-                          OutBuffer &defines) {
-  TimeTraceScope timeScope("Preprocess C file", csrcfile.toChars());
+FileName runCPreprocessor(FileName csrcfile, Loc loc, OutBuffer &defines) {
+  dmd::TimeTraceScope timeScope("Preprocess C file", csrcfile.toChars(), loc);
 
   const char *importc_h = getPathToImportc_h(loc);
 
@@ -84,8 +68,10 @@ FileName runCPreprocessor(FileName csrcfile, const Loc &loc, bool &ifile,
 
   FileName ipath = getOutputPath(loc, csrcfile.toChars());
 
-  const std::string &cc = getCC(isMSVC);
   std::vector<std::string> args;
+  const std::string &cc = getCC(args);
+
+  args.push_back(isMSVC ? "/std:c11" : "-std=c11");
 
   if (!isMSVC)
     appendTargetArgsForGcc(args);
@@ -104,24 +90,42 @@ FileName runCPreprocessor(FileName csrcfile, const Loc &loc, bool &ifile,
     args.push_back("/nologo");
     args.push_back("/P"); // preprocess only
 
-    const bool isClangCl = llvm::StringRef(cc)
-#if LDC_LLVM_VER >= 1300
-                               .contains_insensitive("clang-cl");
-#else
-                               .contains_lower("clang-cl");
-#endif
+    const bool isClangCl = llvm::StringRef(cc).contains_insensitive("clang-cl");
 
     if (!isClangCl) {
       args.push_back("/PD");              // print all macro definitions
       args.push_back("/Zc:preprocessor"); // use the new conforming preprocessor
     } else {
+      // propagate the target to the preprocessor
+      args.push_back("--target=" + triple.getTriple());
+
+#if LDC_LLVM_VER >= 1800 // getAllProcessorFeatures was introduced in this version
+      // propagate all enabled/disabled features to the preprocessor
+      const auto &subTarget = gTargetMachine->getMCSubtargetInfo();
+      const auto &featureBits = subTarget->getFeatureBits();
+      llvm::SmallString<64> featureString;
+      for (const auto &feature : subTarget->getAllProcessorFeatures()) {
+        args.push_back("-Xclang");
+        args.push_back("-target-feature");
+        args.push_back("-Xclang");
+
+        featureString += featureBits.test(feature.Value) ? '+' : '-';
+        featureString += feature.Key;
+        args.push_back(featureString.str().str());
+        featureString.clear();
+      }
+#endif
+
       // print macro definitions (clang-cl doesn't support /PD - use clang's
       // -dD)
-      args.push_back("-Xclang");
-      args.push_back("-dD");
+      args.push_back("/clang:-dD");
 
       // need to redefine some macros in importc.h
       args.push_back("-Wno-builtin-macro-redefined");
+
+      // disable the clang resource headers (immintrin.h etc.), using
+      // unsupported types like __int128, __bf16 etc. - stick to the MS headers
+      args.push_back("-nobuiltininc");
     }
 
     args.push_back(csrcfile.toChars());
@@ -150,6 +154,5 @@ FileName runCPreprocessor(FileName csrcfile, const Loc &loc, bool &ifile,
     fatal();
   }
 
-  ifile = true;
   return ipath;
 }

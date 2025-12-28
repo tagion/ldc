@@ -14,11 +14,12 @@ module core.internal.vararg.aarch64;
 
 version (AArch64):
 
-// Darwin uses a simpler varargs implementation
+// Darwin and Windows use a simpler varargs implementation
 version (OSX) {}
 else version (iOS) {}
 else version (TVOS) {}
 else version (WatchOS) {}
+else version (CRuntime_Microsoft) {}
 else:
 
 import core.stdc.stdarg : alignUp;
@@ -35,8 +36,16 @@ extern (C++, std) struct __va_list
     int __vr_offs;
 }
 
-///
-alias va_list = __va_list;
+version (DigitalMars)
+{
+    ///
+    alias __va_list_tag = __va_list;
+    ///
+    alias va_list = __va_list*;
+}
+else
+    ///
+    alias va_list = __va_list; // kludge - va_list always passed by ref (!)
 
 ///
 T va_arg(T)(ref va_list ap)

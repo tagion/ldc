@@ -1,12 +1,12 @@
 /**
  * Code for generating .json descriptions of the module when passing the `-X` flag to dmd.
  *
- * Copyright:   Copyright (C) 1999-2024 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2025 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 https://www.digitalmars.com, Walter Bright)
  * License:     $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
- * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/json.d, _json.d)
+ * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/compiler/src/dmd/json.d, _json.d)
  * Documentation:  https://dlang.org/phobos/dmd_json.html
- * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/src/dmd/json.d
+ * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/compiler/src/dmd/json.d
  */
 
 module dmd.json;
@@ -24,6 +24,7 @@ import dmd.denum;
 import dmd.dimport;
 import dmd.dmodule;
 import dmd.dsymbol;
+import dmd.dsymbolsem : include;
 import dmd.dtemplate;
 import dmd.errors;
 import dmd.expression;
@@ -40,9 +41,13 @@ import dmd.root.string;
 import dmd.target;
 import dmd.visitor;
 
-version(Windows) {
-    extern (C) char* getcwd(char* buffer, size_t maxlen);
-} else {
+version(Windows)
+{
+    extern (C) char* _getcwd(char* buffer, size_t maxlen);
+    alias getcwd = _getcwd;
+}
+else
+{
     import core.sys.posix.unistd : getcwd;
 }
 
@@ -328,7 +333,7 @@ public:
         }
     }
 
-    extern(D) void propertyStorageClass(const char[] name, StorageClass stc)
+    extern(D) void propertyStorageClass(const char[] name, STC stc)
     {
         stc &= STC.visibleStorageClasses;
         if (stc)
@@ -345,23 +350,22 @@ public:
         }
     }
 
-    extern(D) void property(const char[] linename, const char[] charname, const ref Loc loc)
+    extern(D) void property(const char[] linename, const char[] charname, Loc loc)
     {
         if (loc.isValid())
         {
-            if (auto filename = loc.filename.toDString)
+            SourceLoc sl = SourceLoc(loc);
+            if (sl.filename.length > 0 && sl.filename != this.filename)
             {
-                if (filename != this.filename)
-                {
-                    this.filename = filename;
-                    property("file", filename);
-                }
+                this.filename = sl.filename;
+                property("file", sl.filename);
             }
-            if (loc.linnum)
+
+            if (sl.linnum)
             {
-                property(linename, loc.linnum);
-                if (loc.charnum)
-                    property(charname, loc.charnum);
+                property(linename, sl.linnum);
+                if (sl.charnum)
+                    property(charname, sl.charnum);
             }
         }
     }
@@ -873,12 +877,9 @@ public:
 
         propertyStart("predefinedVersions");
         arrayStart();
-        if (global.versionids)
+        foreach (const versionid; global.versionids)
         {
-            foreach (const versionid; *global.versionids)
-            {
-                item(versionid.toString());
-            }
+            item(versionid.toString());
         }
         arrayEnd();
 
@@ -905,12 +906,9 @@ public:
 
         propertyStart("importPaths");
         arrayStart();
-        if (global.params.imppath)
+        foreach (importPath; global.params.imppath[])
         {
-            foreach (importPath; *global.params.imppath)
-            {
-                item(importPath.toDString);
-            }
+            item(importPath.path.toDString);
         }
         arrayEnd();
 
@@ -984,7 +982,7 @@ public:
  *      modules = array of Modules
  *      buf = write json output to buf
  */
-extern (C++) void json_generate(ref Modules modules, ref OutBuffer buf)
+void json_generate(ref Modules modules, ref OutBuffer buf)
 {
     scope ToJsonVisitor json = new ToJsonVisitor(&buf);
     // write trailing newline
@@ -996,35 +994,34 @@ extern (C++) void json_generate(ref Modules modules, ref OutBuffer buf)
         // of modules representing their syntax.
         json.generateModules(modules);
         json.removeComma();
+        return;
     }
-    else
-    {
-        // Generate the new format which is an object where each
-        // output option is its own field.
 
-        json.objectStart();
-        if (global.params.jsonFieldFlags & JsonFieldFlags.compilerInfo)
-        {
-            json.propertyStart("compilerInfo");
-            json.generateCompilerInfo();
-        }
-        if (global.params.jsonFieldFlags & JsonFieldFlags.buildInfo)
-        {
-            json.propertyStart("buildInfo");
-            json.generateBuildInfo();
-        }
-        if (global.params.jsonFieldFlags & JsonFieldFlags.modules)
-        {
-            json.propertyStart("modules");
-            json.generateModules(modules);
-        }
-        if (global.params.jsonFieldFlags & JsonFieldFlags.semantics)
-        {
-            json.propertyStart("semantics");
-            json.generateSemantics();
-        }
-        json.objectEnd();
+    // Generate the new format which is an object where each
+    // output option is its own field.
+
+    json.objectStart();
+    if (global.params.jsonFieldFlags & JsonFieldFlags.compilerInfo)
+    {
+        json.propertyStart("compilerInfo");
+        json.generateCompilerInfo();
     }
+    if (global.params.jsonFieldFlags & JsonFieldFlags.buildInfo)
+    {
+        json.propertyStart("buildInfo");
+        json.generateBuildInfo();
+    }
+    if (global.params.jsonFieldFlags & JsonFieldFlags.modules)
+    {
+        json.propertyStart("modules");
+        json.generateModules(modules);
+    }
+    if (global.params.jsonFieldFlags & JsonFieldFlags.semantics)
+    {
+        json.propertyStart("semantics");
+        json.generateSemantics();
+    }
+    json.objectEnd();
 }
 
 /**
@@ -1053,7 +1050,7 @@ Params:
 Returns: JsonFieldFlags.none on error, otherwise the JsonFieldFlags value
          corresponding to the given fieldName.
 */
-extern (C++) JsonFieldFlags tryParseJsonField(const(char)* fieldName)
+JsonFieldFlags tryParseJsonField(const(char)* fieldName)
 {
     auto fieldNameString = fieldName.toDString();
     foreach (idx, enumName; __traits(allMembers, JsonFieldFlags))

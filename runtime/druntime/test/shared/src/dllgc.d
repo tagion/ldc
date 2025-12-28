@@ -29,7 +29,7 @@ version(DLL)
         void term() nothrow
         {
             stop = true;
-            event.set();
+            event.setIfInitialized();
             joinLowLevelThread(tid);
         }
     }
@@ -42,9 +42,9 @@ version(DLL)
 
     static ~this()
     {
-        // creating thread in shutdown should fail
+        // creating thread in shutdown should fail when statically linked
         auto tsk = new Task;
-        assert(tsk.tid == ThreadID.init);
+        assert((tsk.tid != ThreadID.init) == isSharedDRuntime());
     }
 }
 else

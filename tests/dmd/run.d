@@ -211,7 +211,7 @@ Options:
             {
                 const string name = target.filename
                             ? target.normalizedTestName
-                            : "`unit` tests";
+                            : "`unit` tests: " ~ (cast(string)unitTestRunnerCommand) ~ " " ~ join(target.args, " ");
 
                 writeln(">>> TARGET FAILED: ", name);
                 synchronized failedTargets ~= name;
@@ -295,10 +295,15 @@ void ensureToolsExists(const string[string] env, const TestTool[] tools ...)
             if (sourceFile is null)
                 sourceFile = toolsDir.buildPath(tool ~ ".d");
         }
-        if (targetBin.timeLastModified.ifThrown(SysTime.init) >= sourceFile.timeLastModified)
+        auto lastModifiedBin = targetBin.timeLastModified.ifThrown(SysTime.init);
+        if (lastModifiedBin >= sourceFile.timeLastModified)
         {
-            log("%s is already up-to-date", tool);
-            continue;
+            auto lastModifiedDmd = env["DMD"].timeLastModified.ifThrown(SysTime.init);
+            if (!tool.linksWithTests || lastModifiedBin >= lastModifiedDmd)
+            {
+                log("%s is already up-to-date", tool);
+                continue;
+            }
         }
 
         string[] buildCommand;
@@ -319,12 +324,9 @@ void ensureToolsExists(const string[string] env, const TestTool[] tools ...)
         }
         else
         {
-            string model = env["MODEL"];
-            if (model == "32omf") model = "32";
-
             buildCommand = [
                 hostDMD,
-                "-m"~model,
+                "-m"~env["MODEL"],
                 "-of"~targetBin,
                 sourceFile
             ] ~ getPicFlags(env) ~ tool.extraArgs;
@@ -622,8 +624,12 @@ string[string] getEnvironment()
       }
 
         version(OSX)
-            version(X86_64)
+        {
+            version (IN_LLVM)
                 env["D_OBJC"] = "1";
+            else version(X86_64)
+                env["D_OBJC"] = "1";
+        }
     }
     return env;
 }

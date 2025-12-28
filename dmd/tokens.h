@@ -1,6 +1,6 @@
 
 /* Compiler implementation of the D programming language
- * Copyright (C) 1999-2024 by The D Language Foundation, All Rights Reserved
+ * Copyright (C) 1999-2025 by The D Language Foundation, All Rights Reserved
  * written by Walter Bright
  * https://www.digitalmars.com
  * Distributed under the Boost Software License, Version 1.0.
@@ -54,7 +54,6 @@ enum class TOK : unsigned char
     false_,
     throw_,
     new_,
-    delete_,
     variable,
     slice,
     version_,
@@ -133,6 +132,7 @@ enum class TOK : unsigned char
     // Leaf operators
     identifier,
     string_,
+    interpolated,
     hexadecimalString,
     this_,
     super_,
@@ -257,6 +257,7 @@ enum class TOK : unsigned char
     wchar_tLiteral,
     endOfLine,  // \n, \r, \u2028, \u2029
     whitespace,
+    rvalue,
 
     // C only keywords
     inline_,
@@ -281,6 +282,7 @@ enum class TOK : unsigned char
     // C only extended keywords
     _assert,
     _import,
+    _module,
     cdecl_,
     declspec,
     stdcall,
@@ -390,6 +392,7 @@ enum class EXP : unsigned char
     // Leaf operators
     identifier,
     string_,
+    interpolated,
     this_,
     super_,
     halt,
@@ -461,7 +464,12 @@ struct Token
         real_t floatvalue;
 
         struct
-        {   utf8_t *ustring;     // UTF8 string
+        {
+            union
+            {
+                utf8_t *ustring;     // UTF8 string
+                void *interpolatedSet;
+            };
             unsigned len;
             unsigned char postfix;      // 'c', 'w', 'd'
         };
@@ -469,7 +477,7 @@ struct Token
         Identifier *ident;
     };
 
-    Token() : next(NULL) {}
+    Token() : next(nullptr) {}
     const char *toChars() const;
 
     static const char *toChars(TOK value);

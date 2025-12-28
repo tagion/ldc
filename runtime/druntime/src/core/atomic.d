@@ -173,7 +173,7 @@ void atomicStore(MemoryOrder ms = MemoryOrder.seq, T, V)(ref shared T val, auto 
 {
     static assert (is (V : T), "Can't assign `newval` of type `shared " ~ V.stringof ~ "` to `shared " ~ T.stringof ~ "`.");
 
-    core.internal.atomic.atomicStore!ms(cast(T*)&val, cast(V)newval);
+    core.internal.atomic.atomicStore!ms(cast(T*)&val, *cast(V*)&newval);
 }
 
 /**
@@ -652,7 +652,7 @@ version (LDC)
     version (D_LP64)
     {
         version (PPC64)
-            enum has128BitCAS = false;
+            enum has128BitCAS = real.mant_dig == 113;
         else
             enum has128BitCAS = true;
     }

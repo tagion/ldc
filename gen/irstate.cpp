@@ -132,8 +132,8 @@ bool IRState::emitArrayBoundsChecks() {
   return t->ty == TY::Tfunction && ((TypeFunction *)t)->trust == TRUST::safe;
 }
 
-LLConstant *
-IRState::setGlobalVarInitializer(LLGlobalVariable *&globalVar,
+LLGlobalVariable *
+IRState::setGlobalVarInitializer(LLGlobalVariable *globalVar,
                                  LLConstant *initializer,
                                  Dsymbol *symbolForLinkageAndVisibility) {
   if (initializer->getType() == globalVar->getValueType()) {
@@ -155,17 +155,13 @@ IRState::setGlobalVarInitializer(LLGlobalVariable *&globalVar,
 
   defineGlobal(globalHelperVar, initializer, symbolForLinkageAndVisibility);
 
-  // Replace all existing uses of globalVar by the bitcast pointer.
-  auto castHelperVar = DtoBitCast(globalHelperVar, globalVar->getType());
-  globalVar->replaceAllUsesWith(castHelperVar);
+  // Replace all existing uses of globalVar by the helper variable.
+  globalVar->replaceAllUsesWith(globalHelperVar);
 
   // Register replacement for later occurrences of the original globalVar.
-  globalsToReplace.emplace_back(globalVar, castHelperVar);
+  globalsToReplace.emplace_back(globalVar, globalHelperVar);
 
-  // Reset globalVar to the helper variable.
-  globalVar = globalHelperVar;
-
-  return castHelperVar;
+  return globalHelperVar;
 }
 
 void IRState::replaceGlobals() {
@@ -179,13 +175,13 @@ void IRState::replaceGlobals() {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-LLConstant *IRState::getStructLiteralConstant(StructLiteralExp *sle) const {
-  return static_cast<LLConstant *>(structLiteralConstants.lookup(sle->origin));
+LLGlobalVariable *IRState::getStructLiteralGlobal(StructLiteralExp *sle) const {
+  return structLiteralGlobals.lookup(sle->origin);
 }
 
-void IRState::setStructLiteralConstant(StructLiteralExp *sle,
-                                       LLConstant *constant) {
-  structLiteralConstants[sle->origin] = constant;
+void IRState::setStructLiteralGlobal(StructLiteralExp *sle,
+                                     LLGlobalVariable *global) {
+  structLiteralGlobals[sle->origin] = global;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -195,7 +191,11 @@ template <typename F>
 LLGlobalVariable *
 getCachedStringLiteralImpl(llvm::Module &module,
                            llvm::StringMap<LLGlobalVariable *> &cache,
-                           llvm::StringRef key, F initFactory) {
+                           llvm::StringRef key,
+#if LDC_LLVM_VER >= 1700
+                           std::optional< unsigned > addrspace,
+#endif
+                           F initFactory) {
   auto iter = cache.find(key);
   if (iter != cache.end()) {
     return iter->second;
@@ -205,7 +205,12 @@ getCachedStringLiteralImpl(llvm::Module &module,
 
   auto gvar =
       new LLGlobalVariable(module, constant->getType(), true,
-                           LLGlobalValue::PrivateLinkage, constant, ".str");
+                           LLGlobalValue::PrivateLinkage, constant,
+                           ".str", nullptr, llvm::GlobalValue::NotThreadLocal
+#if LDC_LLVM_VER >= 1700
+                           , addrspace
+#endif
+                           );
   gvar->setUnnamedAddr(LLGlobalValue::UnnamedAddr::Global);
 
   cache[key] = gvar;
@@ -215,6 +220,17 @@ getCachedStringLiteralImpl(llvm::Module &module,
 }
 
 LLGlobalVariable *IRState::getCachedStringLiteral(StringExp *se) {
+  // special case for ulong[]-typed hex strings: not cached, and not
+  // null-terminated either
+  if (se->sz == 8) {
+    auto constant = buildStringLiteralConstant(se, se->len);
+    auto gvar =
+        new LLGlobalVariable(module, constant->getType(), true,
+                             LLGlobalValue::PrivateLinkage, constant, ".lstr");
+    gvar->setUnnamedAddr(LLGlobalValue::UnnamedAddr::Global);
+    return gvar;
+  }
+
   llvm::StringMap<LLGlobalVariable *> *cache;
   switch (se->sz) {
   default:
@@ -234,14 +250,28 @@ LLGlobalVariable *IRState::getCachedStringLiteral(StringExp *se) {
   const llvm::StringRef key(reinterpret_cast<const char *>(keyData.ptr),
                             keyData.length);
 
-  return getCachedStringLiteralImpl(module, *cache, key, [se]() {
+  return getCachedStringLiteralImpl(module, *cache, key,
+#if LDC_LLVM_VER >= 1700
+                                    std::nullopt,
+#endif
+                                    [se]() {
     // null-terminate
-    return buildStringLiteralConstant(se, se->numberOfCodeUnits() + 1);
+    return buildStringLiteralConstant(se, se->len + 1);
   });
 }
 
-LLGlobalVariable *IRState::getCachedStringLiteral(llvm::StringRef s) {
-  return getCachedStringLiteralImpl(module, cachedStringLiterals, s, [&]() {
+LLGlobalVariable *IRState::getCachedStringLiteral(llvm::StringRef s
+#if LDC_LLVM_VER >= 1700
+                                                  ,std::optional< unsigned > addrspace
+#endif
+                                                  ) {
+  return getCachedStringLiteralImpl(module,
+                                    cachedStringLiterals,
+                                    s,
+#if LDC_LLVM_VER >= 1700
+                                    addrspace,
+#endif
+                                    [&]() {
     return llvm::ConstantDataArray::getString(context(), s, true);
   });
 }
@@ -264,18 +294,17 @@ void IRState::addLinkerDependentLib(llvm::StringRef libraryName) {
 ////////////////////////////////////////////////////////////////////////////////
 
 llvm::CallInst *
-IRState::createInlineAsmCall(const Loc &loc, llvm::InlineAsm *ia,
+IRState::createInlineAsmCall(Loc loc, llvm::InlineAsm *ia,
                              llvm::ArrayRef<llvm::Value *> args,
                              llvm::ArrayRef<llvm::Type *> indirectTypes) {
   llvm::CallInst *call = ir->CreateCall(ia, args);
   addInlineAsmSrcLoc(loc, call);
 
-#if LDC_LLVM_VER >= 1400
   // a non-indirect output constraint (=> return value of call) shifts the
   // constraint/argument index mapping
   ptrdiff_t i = call->getType()->isVoidTy() ? 0 : -1;
   size_t indirectIdx = 0;
-    
+
   for (const auto &constraintInfo : ia->ParseConstraints()) {
     if (constraintInfo.isIndirect) {
       call->addParamAttr(i, llvm::Attribute::get(
@@ -286,13 +315,11 @@ IRState::createInlineAsmCall(const Loc &loc, llvm::InlineAsm *ia,
     }
     ++i;
   }
-#endif
 
   return call;
 }
 
-void IRState::addInlineAsmSrcLoc(const Loc &loc,
-                                 llvm::CallInst *inlineAsmCall) {
+void IRState::addInlineAsmSrcLoc(Loc loc, llvm::CallInst *inlineAsmCall) {
   // Simply use a stack of Loc* per IR module, and use index+1 as 32-bit
   // cookie to be mapped back by the InlineAsmDiagnosticHandler.
   // 0 is not a valid cookie.
@@ -306,7 +333,7 @@ void IRState::addInlineAsmSrcLoc(const Loc &loc,
       llvm::MDNode::get(context(), llvm::ConstantAsMetadata::get(constant)));
 }
 
-const Loc &IRState::getInlineAsmSrcLoc(unsigned srcLocCookie) const {
+Loc IRState::getInlineAsmSrcLoc(unsigned srcLocCookie) const {
   assert(srcLocCookie > 0 && srcLocCookie <= inlineAsmLocs.size());
   return inlineAsmLocs[srcLocCookie - 1];
 }

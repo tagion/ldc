@@ -1,12 +1,12 @@
 /**
  * Performs the semantic2 stage, which deals with initializer expressions.
  *
- * Copyright:   Copyright (C) 1999-2024 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2025 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 https://www.digitalmars.com, Walter Bright)
  * License:     $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
- * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/semantic2.d, _semantic2.d)
+ * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/compiler/src/dmd/semantic2.d, _semantic2.d)
  * Documentation:  https://dlang.org/phobos/dmd_semantic2.html
- * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/src/dmd/semantic2.d
+ * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/compiler/src/dmd/semantic2.d
  */
 
 module dmd.semantic2;
@@ -21,6 +21,7 @@ import dmd.astcodegen;
 import dmd.astenums;
 import dmd.attrib;
 import dmd.blockexit;
+import dmd.timetrace;
 import dmd.clone;
 import dmd.dcast;
 import dmd.dclass;
@@ -40,6 +41,7 @@ import dmd.escape;
 import dmd.expression;
 import dmd.expressionsem;
 import dmd.func;
+import dmd.funcsem;
 import dmd.globals;
 import dmd.id;
 import dmd.identifier;
@@ -55,6 +57,7 @@ import dmd.parse;
 import dmd.root.filename;
 import dmd.common.outbuffer;
 import dmd.root.rmem;
+import dmd.root.string : toDString;
 import dmd.rootobject;
 import dmd.root.utf;
 import dmd.sideeffect;
@@ -73,20 +76,10 @@ enum LOG = false;
 /*************************************
  * Does semantic analysis on initializers and members of aggregates.
  */
-extern(C++) void semantic2(Dsymbol dsym, Scope* sc)
-{
-version (IN_LLVM)
-{
-    import driver.timetrace_sema;
-    scope v = new Semantic2Visitor(sc);
-    scope vtimetrace = new SemanticTimeTraceVisitor!Semantic2Visitor(v);
-    dsym.accept(vtimetrace);
-}
-else
+void semantic2(Dsymbol dsym, Scope* sc)
 {
     scope v = new Semantic2Visitor(sc);
     dsym.accept(v);
-}
 }
 
 private extern(C++) final class Semantic2Visitor : Visitor
@@ -127,43 +120,7 @@ private extern(C++) final class Semantic2Visitor : Visitor
         else if (result)
             return;
 
-        if (sa.msgs)
-        {
-            OutBuffer msgbuf;
-            for (size_t i = 0; i < sa.msgs.length; i++)
-            {
-                Expression e = (*sa.msgs)[i];
-                sc = sc.startCTFE();
-                e = e.expressionSemantic(sc);
-                e = resolveProperties(sc, e);
-                sc = sc.endCTFE();
-                e = ctfeInterpretForPragmaMsg(e);
-                if (e.op == EXP.error)
-                {
-                    errorSupplemental(sa.loc, "while evaluating `static assert` argument `%s`", (*sa.msgs)[i].toChars());
-                    return;
-                }
-                StringExp se = e.toStringExp();
-                if (se)
-                {
-                    const slice = se.toUTF8(sc).peekString();
-                    // Hack to keep old formatting to avoid changing error messages everywhere
-                    if (sa.msgs.length == 1)
-                        msgbuf.printf("\"%.*s\"", cast(int)slice.length, slice.ptr);
-                    else
-                        msgbuf.printf("%.*s", cast(int)slice.length, slice.ptr);
-                }
-                else
-                    msgbuf.printf("%s", e.toChars());
-            }
-            error(sa.loc, "static assert:  %s", msgbuf.extractChars());
-        }
-        else
-            error(sa.loc, "static assert:  `%s` is false", sa.exp.toChars());
-        if (sc.tinst)
-            sc.tinst.printInstantiationTrace();
-        if (!global.gag)
-            fatal();
+        staticAssertFail(sa, sc);
     }
 
     override void visit(TemplateInstance tempinst)
@@ -189,11 +146,9 @@ private extern(C++) final class Semantic2Visitor : Visitor
         sc.tinst = tempinst;
         sc.minst = tempinst.minst;
 
-        int needGagging = (tempinst.gagged && !global.gag);
-        uint olderrors = global.errors;
-        int oldGaggedErrors = -1; // dead-store to prevent spurious warning
-        if (needGagging)
-            oldGaggedErrors = global.startGagging();
+        const needGagging = (tempinst.gagged && !global.gag);
+        const olderrors = global.errors;
+        const oldGaggedErrors = needGagging ? global.startGagging() : -1;
 
         for (size_t i = 0; i < tempinst.members.length; i++)
         {
@@ -273,7 +228,7 @@ private extern(C++) final class Semantic2Visitor : Visitor
             return;
         }
 
-        UserAttributeDeclaration.checkGNUABITag(vd, vd._linkage);
+        checkGNUABITag(vd, vd._linkage);
 
         if (vd._init && !vd.toParent().isFuncDeclaration())
         {
@@ -291,7 +246,7 @@ private extern(C++) final class Semantic2Visitor : Visitor
             // https://issues.dlang.org/show_bug.cgi?id=14166
             // https://issues.dlang.org/show_bug.cgi?id=20417
             // Don't run CTFE for the temporary variables inside typeof or __traits(compiles)
-            vd._init = vd._init.initializerSemantic(sc, vd.type, sc.intypeof == 1 || sc.flags & SCOPE.compile ? INITnointerpret : INITinterpret);
+            vd._init = vd._init.initializerSemantic(sc, vd.type, sc.intypeof == 1 || sc.traitsCompiles ? INITnointerpret : INITinterpret);
             lowerStaticAAs(vd, sc);
             vd.inuse--;
         }
@@ -324,7 +279,7 @@ private extern(C++) final class Semantic2Visitor : Visitor
                         return arrayHasInvalidEnumInitializer((cast(StructLiteralExp)e).elements);
                     if (e.op == EXP.assocArrayLiteral)
                     {
-                        AssocArrayLiteralExp ae = cast(AssocArrayLiteralExp)e;
+                        auto ae = cast(AssocArrayLiteralExp)e;
                         return arrayHasInvalidEnumInitializer(ae.values) ||
                                arrayHasInvalidEnumInitializer(ae.keys);
                     }
@@ -332,24 +287,34 @@ private extern(C++) final class Semantic2Visitor : Visitor
                 }
 
                 if (hasInvalidEnumInitializer(ei.exp))
-                    .error(vd.loc, "%s `%s` : Unable to initialize enum with class or pointer to struct. Use static const variable instead.", vd.kind, vd.toPrettyChars);
+                {
+                    .error(vd.loc, "%s `%s` : Unable to initialize enum with class or pointer to struct", vd.kind, vd.toPrettyChars);
+                    .errorSupplemental(vd.loc, "use static const variable instead");
+                }
             }
         }
         else if (vd._init && vd.isThreadlocal())
         {
             // Cannot initialize a thread-local class or pointer to struct variable with a literal
             // that itself is a thread-local reference and would need dynamic initialization also.
-            if ((vd.type.ty == Tclass) && vd.type.isMutable() && !vd.type.isShared())
+            if (vd.type.ty == Tclass && vd.type.isMutable() && !vd.type.isShared())
             {
                 ExpInitializer ei = vd._init.isExpInitializer();
                 if (ei && ei.exp.op == EXP.classReference)
-                    .error(vd.loc, "%s `%s` is a thread-local class and cannot have a static initializer. Use `static this()` to initialize instead.", vd.kind, vd.toPrettyChars);
+                {
+                    .error(vd.loc, "%s `%s` is a thread-local class and cannot have a static initializer", vd.kind, vd.toPrettyChars);
+                    .errorSupplemental(vd.loc, "use `static this()` to initialize instead");
+                }
             }
             else if (vd.type.ty == Tpointer && vd.type.nextOf().ty == Tstruct && vd.type.nextOf().isMutable() && !vd.type.nextOf().isShared())
             {
                 ExpInitializer ei = vd._init.isExpInitializer();
                 if (ei && ei.exp.op == EXP.address && (cast(AddrExp)ei.exp).e1.op == EXP.structLiteral)
-                    .error(vd.loc, "%s `%s` is a thread-local pointer to struct and cannot have a static initializer. Use `static this()` to initialize instead.", vd.kind, vd.toPrettyChars);
+                {
+                    .error(vd.loc, "%s `%s` is a thread-local pointer to struct and cannot have a static initializer", vd.kind, vd.toPrettyChars);
+                    .errorSupplemental(vd.loc, "use `static this()` to initialize instead");
+                }
+
             }
         }
         vd.semanticRun = PASS.semantic2done;
@@ -401,6 +366,9 @@ private extern(C++) final class Semantic2Visitor : Visitor
         }
         assert(fd.semanticRun <= PASS.semantic2);
         fd.semanticRun = PASS.semantic2;
+
+        timeTraceBeginEvent(TimeTraceEventType.sema2);
+        scope(exit) timeTraceEndEvent(TimeTraceEventType.sema2, fd);
 
         //printf("FuncDeclaration::semantic2 [%s] fd: %s type: %s\n", fd.loc.toChars(), fd.toChars(), fd.type ? fd.type.toChars() : "".ptr);
 
@@ -511,7 +479,7 @@ private extern(C++) final class Semantic2Visitor : Visitor
             return;
         TypeFunction f = cast(TypeFunction) fd.type;
 
-        UserAttributeDeclaration.checkGNUABITag(fd, fd._linkage);
+        checkGNUABITag(fd, fd._linkage);
         //semantic for parameters' UDAs
         foreach (i, param; f.parameterList)
         {
@@ -545,7 +513,7 @@ private extern(C++) final class Semantic2Visitor : Visitor
             printf("+Nspace::semantic2('%s')\n", ns.toChars());
             scope(exit) printf("-Nspace::semantic2('%s')\n", ns.toChars());
         }
-        UserAttributeDeclaration.checkGNUABITag(ns, LINK.cpp);
+        checkGNUABITag(ns, LINK.cpp);
         if (!ns.members)
             return;
 
@@ -603,7 +571,7 @@ private extern(C++) final class Semantic2Visitor : Visitor
 
     override void visit(CPPNamespaceDeclaration decl)
     {
-        UserAttributeDeclaration.checkGNUABITag(decl, LINK.cpp);
+        checkGNUABITag(decl, LINK.cpp);
         visit(cast(AttribDeclaration)decl);
     }
 
@@ -630,7 +598,7 @@ private extern(C++) final class Semantic2Visitor : Visitor
                 }
 
                 // Handles compiler-recognized `core.attribute.gnuAbiTag`
-                if (UserAttributeDeclaration.isGNUABITag(e))
+                if (isGNUABITag(e))
                     doGNUABITagSemantic(e, lastTag);
             }
         }
@@ -652,8 +620,7 @@ private extern(C++) final class Semantic2Visitor : Visitor
             return;
         }
 
-        UserAttributeDeclaration.checkGNUABITag(
-            ad, ad.classKind == ClassKind.cpp ? LINK.cpp : LINK.d);
+        checkGNUABITag(ad, ad.classKind == ClassKind.cpp ? LINK.cpp : LINK.d);
 
         auto sc2 = ad.newScope(sc);
 
@@ -760,8 +727,7 @@ private extern(C++) final class Semantic2Visitor : Visitor
  */
 private void doGNUABITagSemantic(ref Expression e, ref Expression* lastTag)
 {
-    import dmd.dmangle;
-
+    import dmd.mangle : isValidMangling;
     // When `@gnuAbiTag` is used, the type will be the UDA, not the struct literal
     if (e.op == EXP.type)
     {
@@ -838,6 +804,128 @@ private void doGNUABITagSemantic(ref Expression e, ref Expression* lastTag)
     ale.elements.sort!predicate;
 }
 
+/****************
+ * Find virtual function matching identifier and type.
+ * Used to build virtual function tables for interface implementations.
+ * Params:
+ *  _this = ClassDeclaration's vtbl to search
+ *  ident = function's identifier
+ *  tf = function's type
+ * Returns:
+ *  function symbol if found, null if not
+ * Errors:
+ *  prints error message if more than one match
+ */
+FuncDeclaration findFunc(ClassDeclaration _this, Identifier ident, TypeFunction tf)
+{
+    //printf("ClassDeclaration.findFunc(%s, %s) %s\n", ident.toChars(), tf.toChars(), toChars());
+    FuncDeclaration fdmatch = null;
+    FuncDeclaration fdambig = null;
+
+    void updateBestMatch(FuncDeclaration fd)
+    {
+        fdmatch = fd;
+        fdambig = null;
+        //printf("Lfd fdmatch = %s %s [%s]\n", fdmatch.toChars(), fdmatch.type.toChars(), fdmatch.loc.toChars());
+    }
+
+    void searchVtbl(ref Dsymbols vtbl)
+    {
+        bool seenInterfaceVirtual;
+        foreach (s; vtbl)
+        {
+            auto fd = s.isFuncDeclaration();
+            if (!fd)
+                continue;
+
+            // the first entry might be a ClassInfo
+            //printf("\t[%d] = %s\n", i, fd.toChars());
+            if (ident != fd.ident || fd.type.covariant(tf) != Covariant.yes)
+            {
+                //printf("\t\t%d\n", fd.type.covariant(tf));
+                continue;
+            }
+
+            //printf("fd.parent.isClassDeclaration() = %p\n", fd.parent.isClassDeclaration());
+            if (!fdmatch)
+            {
+                updateBestMatch(fd);
+                continue;
+            }
+            if (fd == fdmatch)
+                continue;
+
+            /* Functions overriding interface functions for extern(C++) with VC++
+             * are not in the normal vtbl, but in vtblFinal. If the implementation
+             * is again overridden in a child class, both would be found here.
+             * The function in the child class should override the function
+             * in the base class, which is done here, because searchVtbl is first
+             * called for the child class. Checking seenInterfaceVirtual makes
+             * sure, that the compared functions are not in the same vtbl.
+             */
+            if (fd.interfaceVirtual &&
+                fd.interfaceVirtual is fdmatch.interfaceVirtual &&
+                !seenInterfaceVirtual &&
+                fdmatch.type.covariant(fd.type) == Covariant.yes)
+            {
+                seenInterfaceVirtual = true;
+                continue;
+            }
+
+            {
+            // Function type matching: exact > covariant
+            MATCH m1 = tf.equals(fd.type) ? MATCH.exact : MATCH.nomatch;
+            MATCH m2 = tf.equals(fdmatch.type) ? MATCH.exact : MATCH.nomatch;
+            if (m1 > m2)
+            {
+                updateBestMatch(fd);
+                continue;
+            }
+            else if (m1 < m2)
+                continue;
+            }
+            {
+            MATCH m1 = (tf.mod == fd.type.mod) ? MATCH.exact : MATCH.nomatch;
+            MATCH m2 = (tf.mod == fdmatch.type.mod) ? MATCH.exact : MATCH.nomatch;
+            if (m1 > m2)
+            {
+                updateBestMatch(fd);
+                continue;
+            }
+            else if (m1 < m2)
+                continue;
+            }
+            {
+            // The way of definition: non-mixin > mixin
+            MATCH m1 = fd.parent.isClassDeclaration() ? MATCH.exact : MATCH.nomatch;
+            MATCH m2 = fdmatch.parent.isClassDeclaration() ? MATCH.exact : MATCH.nomatch;
+            if (m1 > m2)
+            {
+                updateBestMatch(fd);
+                continue;
+            }
+            else if (m1 < m2)
+                continue;
+            }
+
+            fdambig = fd;
+            //printf("Lambig fdambig = %s %s [%s]\n", fdambig.toChars(), fdambig.type.toChars(), fdambig.loc.toChars());
+        }
+    }
+
+    searchVtbl(_this.vtbl);
+    for (auto cd = _this; cd; cd = cd.baseClass)
+    {
+        searchVtbl(cd.vtblFinal);
+    }
+
+    if (fdambig)
+        _this.classError("%s `%s` ambiguous virtual function `%s`", fdambig.toChars());
+
+    return fdmatch;
+}
+
+
 /**
  * Try lower a variable's Associative Array initializer to a newaa struct
  * so it can be put in static data.
@@ -847,10 +935,11 @@ private void doGNUABITagSemantic(ref Expression e, ref Expression* lastTag)
  */
 void lowerStaticAAs(VarDeclaration vd, Scope* sc)
 {
-    if (vd.storage_class & STC.manifest)
-        return;
     if (auto ei = vd._init.isExpInitializer())
-        lowerStaticAAs(ei.exp, sc);
+    {
+        scope v = new StaticAAVisitor(sc, vd.storage_class);
+        ei.exp.accept(v);
+    }
 }
 
 /**
@@ -862,7 +951,7 @@ void lowerStaticAAs(VarDeclaration vd, Scope* sc)
  */
 void lowerStaticAAs(Expression e, Scope* sc)
 {
-    scope v = new StaticAAVisitor(sc);
+    scope v = new StaticAAVisitor(sc, STC.none);
     e.accept(v);
 }
 
@@ -871,30 +960,80 @@ private extern(C++) final class StaticAAVisitor : SemanticTimeTransitiveVisitor
 {
     alias visit = SemanticTimeTransitiveVisitor.visit;
     Scope* sc;
+    STC storage_class;
 
-    this(Scope* sc) scope @safe
+    this(Scope* sc, STC storage_class) scope @safe
     {
         this.sc = sc;
+        this.storage_class = storage_class;
     }
 
     override void visit(AssocArrayLiteralExp aaExp)
     {
-        if (!verifyHookExist(aaExp.loc, *sc, Id._aaAsStruct, "initializing static associative arrays", Id.object))
-            return;
-
-        Expression hookFunc = new IdentifierExp(aaExp.loc, Id.empty);
-        hookFunc = new DotIdExp(aaExp.loc, hookFunc, Id.object);
-        hookFunc = new DotIdExp(aaExp.loc, hookFunc, Id._aaAsStruct);
-        auto arguments = new Expressions();
-        arguments.push(aaExp);
-        Expression loweredExp = new CallExp(aaExp.loc, hookFunc, arguments);
-
-        sc = sc.startCTFE();
-        loweredExp = loweredExp.expressionSemantic(sc);
-        loweredExp = resolveProperties(sc, loweredExp);
-        sc = sc.endCTFE();
-        loweredExp = loweredExp.ctfeInterpret();
-
-        aaExp.lowering = loweredExp;
+        if (!aaExp.lowering)
+            expressionSemantic(aaExp, sc);
+        assert(aaExp.lowering);
+        if (!(storage_class & STC.manifest)) // manifest constants create runtime copies
+            if (!aaExp.loweringCtfe)
+            {
+                aaExp.loweringCtfe = aaExp.lowering.ctfeInterpret();
+                aaExp.loweringCtfe.accept(this); // lower AAs in keys and values
+            }
+        semanticTypeInfo(sc, aaExp.lowering.type);
     }
+
+    // https://issues.dlang.org/show_bug.cgi?id=24602
+    // TODO: Is this intionally not visited by SemanticTimeTransitiveVisitor?
+    override void visit(ClassReferenceExp crExp)
+    {
+        this.visit(crExp.value);
+    }
+}
+
+/**
+ * Given a static assert with a failing condition, print an error
+ * Params:
+ *   sa = Static assert with failing condition
+ *   sc = scope for evaluating assert message and printing context
+ */
+void staticAssertFail(StaticAssert sa, Scope* sc)
+{
+    if (sa.msgs)
+    {
+        OutBuffer msgbuf;
+        for (size_t i = 0; i < sa.msgs.length; i++)
+        {
+            Expression e = (*sa.msgs)[i];
+            sc = sc.startCTFE();
+            e = e.expressionSemantic(sc);
+            e = resolveProperties(sc, e);
+            sc = sc.endCTFE();
+            e = ctfeInterpretForPragmaMsg(e);
+            if (e.op == EXP.error)
+            {
+                errorSupplemental(sa.loc, "while evaluating `static assert` argument `%s`", (*sa.msgs)[i].toChars());
+                if (!global.gag)
+                    fatal();
+                return;
+            }
+            if (StringExp se = e.toStringExp())
+            {
+                const slice = se.toUTF8(sc).peekString();
+                // Hack to keep old formatting to avoid changing error messages everywhere
+                if (sa.msgs.length == 1)
+                    msgbuf.printf("\"%.*s\"", cast(int)slice.length, slice.ptr);
+                else
+                    msgbuf.printf("%.*s", cast(int)slice.length, slice.ptr);
+            }
+            else
+                msgbuf.printf("%s", e.toChars());
+        }
+        error(sa.loc, "static assert:  %s", msgbuf.extractChars());
+    }
+    else
+        error(sa.loc, "static assert:  `%s` is false", sa.exp.toChars());
+    if (sc.tinst)
+        sc.tinst.printInstantiationTrace();
+    if (!global.gag)
+        fatal();
 }

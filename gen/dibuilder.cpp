@@ -39,6 +39,8 @@
 #include "llvm/Support/Path.h"
 #include <functional>
 
+using namespace dmd;
+
 ////////////////////////////////////////////////////////////////////////////////
 
 namespace cl = llvm::cl;
@@ -115,7 +117,7 @@ DIBuilder::DIBuilder(IRState *const IR)
       // (https://reviews.llvm.org/D23720)
       emitColumnInfo(opts::getFlagOrDefault(::emitColumnInfo, !emitCodeView)) {}
 
-unsigned DIBuilder::getColumn(const Loc &loc) const {
+unsigned DIBuilder::getColumn(Loc loc) const {
   return (loc.linnum() && emitColumnInfo) ? loc.charnum() : 0;
 }
 
@@ -133,7 +135,7 @@ DIScope DIBuilder::GetSymbolScope(Dsymbol *s) {
     // parent composite types have to get declared
     while (!parent->isModule()) {
       if (parent->isAggregateDeclaration())
-        CreateCompositeType(parent->getType());
+        CreateCompositeType(getType(parent));
       parent = parent->toParent();
     }
   }
@@ -143,7 +145,7 @@ DIScope DIBuilder::GetSymbolScope(Dsymbol *s) {
   } else if (auto m = parent->isModule()) {
     return EmitModule(m);
   } else if (parent->isAggregateDeclaration()) {
-    return CreateCompositeType(parent->getType());
+    return CreateCompositeType(getType(parent));
   } else if (auto fd = parent->isFuncDeclaration()) {
     DtoDeclareFunction(fd);
     return EmitSubProgram(fd);
@@ -152,7 +154,7 @@ DIScope DIBuilder::GetSymbolScope(Dsymbol *s) {
   } else if (auto fwd = parent->isForwardingScopeDsymbol()) {
     return GetSymbolScope(fwd);
   } else if (auto ed = parent->isEnumDeclaration()) {
-    auto et = CreateEnumType(ed->getType()->isTypeEnum());
+    auto et = CreateEnumType(getType(ed)->isTypeEnum());
     if (llvm::isa<llvm::DICompositeType>(et))
       return et;
     return EmitNamespace(ed, ed->toChars());
@@ -200,7 +202,7 @@ llvm::StringRef DIBuilder::GetNameAndScope(Dsymbol *sym, DIScope &scope) {
 }
 
 // Sets the memory address for a debuginfo variable.
-void DIBuilder::Declare(const Loc &loc, llvm::Value *storage,
+void DIBuilder::Declare(Loc loc, llvm::Value *storage,
                         DILocalVariable divar, DIExpression diexpr) {
   auto debugLoc = llvm::DILocation::get(IR->context(), loc.linnum(),
                                         getColumn(loc), GetCurrentScope());
@@ -208,7 +210,7 @@ void DIBuilder::Declare(const Loc &loc, llvm::Value *storage,
 }
 
 // Sets the (current) value for a debuginfo variable.
-void DIBuilder::SetValue(const Loc &loc, llvm::Value *value,
+void DIBuilder::SetValue(Loc loc, llvm::Value *value,
                          DILocalVariable divar, DIExpression diexpr) {
   auto debugLoc = llvm::DILocation::get(IR->context(), loc.linnum(),
                                         getColumn(loc), GetCurrentScope());
@@ -239,7 +241,7 @@ DIFile DIBuilder::CreateFile(const char *filename) {
   return DBuilder.createFile(filename, cwd);
 }
 
-DIFile DIBuilder::CreateFile(const Loc &loc) {
+DIFile DIBuilder::CreateFile(Loc loc) {
   return CreateFile(loc.filename());
 }
 
@@ -351,7 +353,7 @@ DIType DIBuilder::CreateEnumType(TypeEnum *type) {
 
   // just emit a typedef for non-integral base types
   auto tb = type->toBasetype();
-  if (!tb->isintegral()) {
+  if (!tb->isIntegral()) {
     auto tbase = CreateTypeDescription(tb);
     return DBuilder.createTypedef(tbase, name, file, lineNumber, scope);
   }
@@ -502,12 +504,12 @@ void DIBuilder::AddStaticMembers(AggregateDeclaration *ad, DIFile file,
   if (!members)
     return;
 
-  auto scope = CreateCompositeType(ad->getType());
+  auto scope = CreateCompositeType(getType(ad));
 
   std::function<void(Dsymbols *)> visitMembers = [&](Dsymbols *members) {
     for (auto s : *members) {
       if (auto attrib = s->isAttribDeclaration()) {
-        if (Dsymbols *d = attrib->include(nullptr))
+        if (Dsymbols *d = include(attrib, nullptr))
           visitMembers(d);
       } else if (auto tmixin = s->isTemplateMixin()) {
         // FIXME: static variables inside a template mixin need to be put inside
@@ -605,7 +607,7 @@ DIType DIBuilder::CreateCompositeType(Type *t) {
   {
     ClassDeclaration *classDecl = ad->isClassDeclaration();
     if (classDecl && classDecl->baseClass) {
-      derivedFrom = CreateCompositeType(classDecl->baseClass->getType());
+      derivedFrom = CreateCompositeType(getType(classDecl->baseClass));
       auto dt = DBuilder.createInheritance(irAggr->diCompositeType,
                                            derivedFrom, // base class type
                                            0,           // offset of base class
@@ -620,13 +622,16 @@ DIType DIBuilder::CreateCompositeType(Type *t) {
   const auto elemsArray = DBuilder.getOrCreateArray(elems);
 
   DIType ret;
+  const auto runtimeLang = 0;
   if (t->ty == TY::Tclass) {
     ret = DBuilder.createClassType(
         scope, name, file, lineNum, sizeInBits, alignmentInBits,
         classOffsetInBits, DIFlags::FlagZero, derivedFrom, elemsArray,
+#if LDC_LLVM_VER >= 1800
+        runtimeLang,
+#endif
         vtableHolder, templateParams, uniqueIdentifier);
   } else {
-    const auto runtimeLang = 0;
     ret = DBuilder.createStructType(scope, name, file, lineNum, sizeInBits,
                                     alignmentInBits, DIFlags::FlagZero,
                                     derivedFrom, elemsArray, runtimeLang,
@@ -648,7 +653,7 @@ DIType DIBuilder::CreateArrayType(TypeArray *type) {
 
   LLMetadata *elems[] = {CreateMemberType(0, Type::tsize_t, file, "length", 0,
                                           Visibility::public_),
-                         CreateMemberType(0, type->nextOf()->pointerTo(), file,
+                         CreateMemberType(0, pointerTo(type->nextOf()), file,
                                           "ptr", target.ptrsize,
                                           Visibility::public_)};
 
@@ -715,21 +720,65 @@ DIType DIBuilder::CreateAArrayType(TypeAArray *type) {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-DISubroutineType DIBuilder::CreateFunctionType(Type *type) {
+DISubroutineType DIBuilder::CreateFunctionType(Type *type,
+                                               FuncDeclaration *fd) {
   TypeFunction *t = type->isTypeFunction();
   assert(t);
 
-  Type *retType = t->next;
+  llvm::SmallVector<LLMetadata *, 8> params;
+  auto pushParam = [&](Type *type, bool isRef) {
+    auto ditype = CreateTypeDescription(type);
+    if (isRef) {
+      if (!ditype) { // void or noreturn
+        ditype = CreateTypeDescription(Type::tuns8);
+      }
+      ditype = DBuilder.createReferenceType(llvm::dwarf::DW_TAG_reference_type,
+                                            ditype, target.ptrsize * 8);
+    }
+    params.emplace_back(ditype);
+  };
 
-  // Create "dummy" subroutine type for the return type
-  LLMetadata *params = {CreateTypeDescription(retType)};
+  // the first 'param' is the return value
+  pushParam(t->next, t->isRef());
+
+  // then the implicit 'this'/context pointer
+  if (fd) {
+    DIType pointeeType = nullptr;
+    if (auto parentAggregate = fd->isThis()) {
+      pointeeType = CreateCompositeType(parentAggregate->type);
+    } else if (fd->isNested()) {
+      pointeeType = CreateTypeDescription(Type::tuns8); // cannot use void
+    }
+
+    if (pointeeType) {
+      DIType ditype = DBuilder.createReferenceType(
+          llvm::dwarf::DW_TAG_pointer_type, pointeeType, target.ptrsize * 8);
+      ditype = DBuilder.createObjectPointerType(ditype
+#if LDC_LLVM_VER >= 2000
+      , /* Implicit */ true
+#endif
+      );
+      params.emplace_back(ditype);
+    }
+  }
+
+  // and finally the formal parameters
+  const auto len = t->parameterList.length();
+  for (size_t i = 0; i < len; i++) {
+    const auto param = t->parameterList[i];
+    pushParam(param->type, param->isReference());
+  }
+
   auto paramsArray = DBuilder.getOrCreateTypeArray(params);
-
   return DBuilder.createSubroutineType(paramsArray, DIFlags::FlagZero, 0);
 }
 
 DISubroutineType DIBuilder::CreateEmptyFunctionType() {
+#if LDC_LLVM_VER >= 2100 
+  auto paramsArray = DBuilder.getOrCreateTypeArray({});
+#else
   auto paramsArray = DBuilder.getOrCreateTypeArray(llvm::None);
+#endif
   return DBuilder.createSubroutineType(paramsArray);
 }
 
@@ -743,7 +792,7 @@ DIType DIBuilder::CreateDelegateType(TypeDelegate *type) {
   LLMetadata *elems[] = {
       CreateMemberType(0, Type::tvoidptr, file, "ptr", 0,
                        Visibility::public_),
-      CreateMemberType(0, type->next->pointerTo(), file, "funcptr",
+      CreateMemberType(0, pointerTo(type->next), file, "funcptr",
                        target.ptrsize, Visibility::public_)};
 
   return DBuilder.createStructType(scope, name, file,
@@ -781,7 +830,7 @@ DIType DIBuilder::CreateTypeDescription(Type *t, bool voidToUbyte) {
     return CreateEnumType(te);
   if (auto tv = t->isTypeVector())
     return CreateVectorType(tv);
-  if (t->isintegral() || t->isfloating())
+  if (t->isIntegral() || t->isFloating())
     return CreateBasicType(t);
   if (auto tp = t->isTypePointer())
     return CreatePointerType(tp);
@@ -966,7 +1015,7 @@ DISubprogram DIBuilder::EmitSubProgram(FuncDeclaration *fd) {
         flags, dispFlags);
 
     // Now create subroutine type.
-    diFnType = CreateFunctionType(fd->type);
+    diFnType = CreateFunctionType(fd->type, fd);
   }
 
   // FIXME: duplicates?
@@ -1005,7 +1054,7 @@ DISubprogram DIBuilder::EmitThunk(llvm::Function *Thunk, FuncDeclaration *fd) {
          "Compilation unit missing or corrupted in DIBuilder::EmitThunk");
 
   // Create subroutine type (thunk has same type as wrapped function)
-  DISubroutineType DIFnType = CreateFunctionType(fd->type);
+  DISubroutineType DIFnType = CreateFunctionType(fd->type, fd);
 
   const auto scope = GetSymbolScope(fd);
   const auto name = (llvm::Twine(fd->toChars()) + ".__thunk").str();
@@ -1072,7 +1121,7 @@ void DIBuilder::EmitFuncStart(FuncDeclaration *fd) {
   EmitStopPoint(fd->loc);
 }
 
-void DIBuilder::EmitBlockStart(const Loc &loc) {
+void DIBuilder::EmitBlockStart(Loc loc) {
   if (!mustEmitLocationsDebugInfo())
     return;
 
@@ -1097,7 +1146,7 @@ void DIBuilder::EmitBlockEnd() {
   fn->diLexicalBlocks.pop();
 }
 
-void DIBuilder::EmitStopPoint(const Loc &loc) {
+void DIBuilder::EmitStopPoint(Loc loc) {
   if (!mustEmitLocationsDebugInfo())
     return;
 
@@ -1132,21 +1181,19 @@ void DIBuilder::EmitValue(llvm::Value *val, VarDeclaration *vd) {
   if (!mustEmitFullDebugInfo() || !debugVariable)
     return;
 
-  llvm::Instruction *instr = DBuilder.insertDbgValueIntrinsic(
+  auto instr = DBuilder.insertDbgValueIntrinsic(
       val, debugVariable, DBuilder.createExpression(),
       IR->ir->getCurrentDebugLocation(), IR->scopebb());
-  instr->setDebugLoc(IR->ir->getCurrentDebugLocation());
+#if LDC_LLVM_VER >= 1900
+  llvm::cast<llvm::DbgRecord *>
+#endif
+  (instr)->setDebugLoc(IR->ir->getCurrentDebugLocation());
 }
 
 void DIBuilder::EmitLocalVariable(llvm::Value *ll, VarDeclaration *vd,
                                   Type *type, bool isThisPtr, bool forceAsLocal,
                                   bool isRefRVal,
-#if LDC_LLVM_VER >= 1400
-                                  llvm::ArrayRef<uint64_t> addr
-#else
-                                  llvm::ArrayRef<int64_t> addr
-#endif
-                                  ) {
+                                  llvm::ArrayRef<uint64_t> addr) {
   if (!mustEmitFullDebugInfo())
     return;
 

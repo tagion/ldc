@@ -1,12 +1,12 @@
 /**
  * Semantic analysis for D types.
  *
- * Copyright:   Copyright (C) 1999-2024 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2025 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 https://www.digitalmars.com, Walter Bright)
  * License:     $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
- * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/typesem.d, _typesem.d)
+ * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/compiler/src/dmd/typesem.d, _typesem.d)
  * Documentation:  https://dlang.org/phobos/dmd_typesem.html
- * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/src/dmd/typesem.d
+ * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/compiler/src/dmd/typesem.d
  */
 
 module dmd.typesem;
@@ -28,18 +28,19 @@ import dmd.declaration;
 import dmd.denum;
 import dmd.dimport;
 import dmd.dinterpret;
-import dmd.dmangle;
 import dmd.dmodule;
 import dmd.dscope;
 import dmd.dstruct;
 import dmd.dsymbol;
 import dmd.dsymbolsem;
 import dmd.dtemplate;
+import dmd.enumsem;
 import dmd.errors;
 import dmd.errorsink;
 import dmd.expression;
 import dmd.expressionsem;
 import dmd.func;
+import dmd.funcsem;
 import dmd.globals;
 import dmd.hdrgen;
 import dmd.id;
@@ -51,6 +52,8 @@ import dmd.initsem;
 import dmd.location;
 import dmd.visitor;
 import dmd.mtype;
+import dmd.mangle;
+import dmd.nogc;
 import dmd.objc;
 import dmd.opover;
 import dmd.optimize;
@@ -80,7 +83,7 @@ import dmd.tokens;
  *      ps = set if s[oindex] is a Dsymbol, otherwise null
  *      oindex = index into s
  */
-private void resolveTupleIndex(const ref Loc loc, Scope* sc, Dsymbol s, out Expression pe, out Type pt, out Dsymbol ps, RootObject oindex)
+private void resolveTupleIndex(Loc loc, Scope* sc, Dsymbol s, out Expression pe, out Type pt, out Dsymbol ps, RootObject oindex)
 {
     auto tup = s.isTupleDeclaration();
 
@@ -150,7 +153,7 @@ private void resolveTupleIndex(const ref Loc loc, Scope* sc, Dsymbol s, out Expr
  *      ps = set if symbol otherwise null
  *      typeid = set if in TypeidExpression https://dlang.org/spec/expression.html#TypeidExpression
  */
-private void resolveHelper(TypeQualified mt, const ref Loc loc, Scope* sc, Dsymbol s, Dsymbol scopesym,
+private void resolveHelper(TypeQualified mt, Loc loc, Scope* sc, Dsymbol s, Dsymbol scopesym,
     out Expression pe, out Type pt, out Dsymbol ps, bool intypeid = false)
 {
     version (none)
@@ -166,17 +169,28 @@ private void resolveHelper(TypeQualified mt, const ref Loc loc, Scope* sc, Dsymb
          */
         const p = mt.mutableOf().unSharedOf().toChars();
         auto id = Identifier.idPool(p[0 .. strlen(p)]);
-        if (const n = importHint(id.toString()))
-            error(loc, "`%s` is not defined, perhaps `import %.*s;` ?", p, cast(int)n.length, n.ptr);
-        else if (auto s2 = sc.search_correct(id))
-            error(loc, "undefined identifier `%s`, did you mean %s `%s`?", p, s2.kind(), s2.toChars());
-        else if (const q = Scope.search_correct_C(id))
-            error(loc, "undefined identifier `%s`, did you mean `%s`?", p, q);
-        else if ((id == Id.This   && sc.getStructClassScope()) ||
-                 (id == Id._super && sc.getClassScope()))
-            error(loc, "undefined identifier `%s`, did you mean `typeof(%s)`?", p, p);
-        else
-            error(loc, "undefined identifier `%s`", p);
+        if (!(sc && sc.inCfile))
+        {
+            if (const n = importHint(id.toString()))
+                error(loc, "`%s` is not defined, perhaps `import %.*s;` ?", p, cast(int)n.length, n.ptr);
+            else if (auto s2 = sc.search_correct(id))
+                error(loc, "undefined identifier `%s`, did you mean %s `%s`?", p, s2.kind(), s2.toChars());
+            else if (const q = Scope.search_correct_C(id))
+                error(loc, "undefined identifier `%s`, did you mean `%s`?", p, q);
+            else if ((id == Id.This   && sc.getStructClassScope()) ||
+                     (id == Id._super && sc.getClassScope()))
+                error(loc, "undefined identifier `%s`, did you mean `typeof(%s)`?", p, p);
+            else
+                error(mt.loc, "undefined identifier `%s`", p);
+        }
+        else {
+            if (const n = cIncludeHint(id.toString()))
+                error(loc, "`%s` is not defined, perhaps `#include %.*s` ?", p, cast(int)n.length, n.ptr);
+            else if (auto s2 = sc.search_correct(id))
+                error(loc, "undefined identifier `%s`, did you mean %s `%s`?", p, s2.kind(), s2.toChars());
+            else
+                error(loc, "undefined identifier `%s`", p);
+        }
 
         pt = Type.terror;
         return;
@@ -226,14 +240,14 @@ private void resolveHelper(TypeQualified mt, const ref Loc loc, Scope* sc, Dsymb
             break;
         }
 
-        Type t = s.getType(); // type symbol, type alias, or type tuple?
-        uint errorsave = global.errors;
+        Type t = dmd.dsymbolsem.getType(s); // type symbol, type alias, or type tuple?
+        const errorsave = global.errors;
         SearchOptFlags flags = t is null ? SearchOpt.localsOnly : SearchOpt.ignorePrivateImports;
 
         Dsymbol sm = s.searchX(loc, sc, id, flags);
         if (sm)
         {
-            if (!(sc.flags & SCOPE.ignoresymbolvisibility) && !symbolIsVisible(sc, sm))
+            if (!sc.ignoresymbolvisibility && !symbolIsVisible(sc, sm))
             {
                 .error(loc, "`%s` is not visible from module `%s`", sm.toPrettyChars(), sc._module.toChars());
                 sm = null;
@@ -350,7 +364,7 @@ private void resolveHelper(TypeQualified mt, const ref Loc loc, Scope* sc, Dsymb
     Type t;
     while (1)
     {
-        t = s.getType();
+        t = dmd.dsymbolsem.getType(s);
         if (t)
             break;
         ps = s;
@@ -385,7 +399,7 @@ private void resolveHelper(TypeQualified mt, const ref Loc loc, Scope* sc, Dsymb
  * Returns:
  *      symbol found, NULL if not
  */
-private Dsymbol searchX(Dsymbol dsym, const ref Loc loc, Scope* sc, RootObject id, SearchOptFlags flags)
+private Dsymbol searchX(Dsymbol dsym, Loc loc, Scope* sc, RootObject id, SearchOptFlags flags)
 {
     //printf("Dsymbol::searchX(this=%p,%s, ident='%s')\n", this, toChars(), ident.toChars());
     Dsymbol s = dsym.toAlias();
@@ -428,6 +442,176 @@ private Dsymbol searchX(Dsymbol dsym, const ref Loc loc, Scope* sc, RootObject i
         assert(0);
     }
     return sm;
+}
+
+/***************************************************
+ * Determine if type t is copyable.
+ * Params:
+ *      t = type to check
+ * Returns:
+ *      true if we can copy it
+ */
+bool isCopyable(Type t)
+{
+    //printf("isCopyable() %s\n", t.toChars());
+    if (auto ts = t.isTypeStruct())
+    {
+        if (ts.sym.postblit &&
+            ts.sym.postblit.storage_class & STC.disable)
+            return false;
+        if (ts.sym.hasCopyCtor)
+        {
+            // check if there is a matching overload of the copy constructor and whether it is disabled or not
+            // `assert(ctor)` fails on Win32 and Win_32_64. See: https://auto-tester.puremagic.com/pull-history.ghtml?projectid=1&repoid=1&pullid=10575
+            Dsymbol ctor = search_function(ts.sym, Id.ctor);
+            assert(ctor);
+            scope el = new IdentifierExp(Loc.initial, Id.p); // dummy lvalue
+            el.type = cast() ts;
+            Expressions* args = new Expressions(el);
+            FuncDeclaration f = resolveFuncCall(Loc.initial, null, ctor, null, cast()ts, ArgumentList(args), FuncResolveFlag.quiet);
+            if (!f || f.storage_class & STC.disable)
+                return false;
+        }
+    }
+    return true;
+}
+
+/**************************
+ * When T is mutable,
+ * Given:
+ *      T a, b;
+ * Can we bitwise assign:
+ *      a = b;
+ * ?
+ */
+bool isAssignable(Type t)
+{
+    if (auto te = t.isTypeEnum())
+        t = te.memType();
+    TypeStruct ts = t.isTypeStruct();
+    if (!ts)
+        return true;
+
+    bool assignable = true;
+    uint offset = ~0; // dead-store initialize to prevent spurious warning
+
+    auto sym = ts.sym;
+    sym.determineSize(sym.loc);
+
+    /* If any of the fields are const or immutable,
+     * then one cannot assign this struct.
+     */
+    for (size_t i = 0; i < sym.fields.length; i++)
+    {
+        VarDeclaration v = sym.fields[i];
+        //printf("%s [%d] v = (%s) %s, v.offset = %d, v.parent = %s\n", sym.toChars(), i, v.kind(), v.toChars(), v.offset, v.parent.kind());
+        if (i == 0)
+        {
+        }
+        else if (v.offset == offset)
+        {
+            /* If any fields of anonymous union are assignable,
+             * then regard union as assignable.
+             * This is to support unsafe things like Rebindable templates.
+             */
+            if (assignable)
+                continue;
+        }
+        else
+        {
+            if (!assignable)
+                return false;
+        }
+        assignable = v.type.isMutable() && v.type.isAssignable();
+        offset = v.offset;
+        //printf(" -> assignable = %d\n", assignable);
+    }
+
+    return assignable;
+}
+
+/************************************
+ * Determine mutability of indirections in (ref) t.
+ *
+ * Returns: When the type has any mutable indirections, returns 0.
+ * When all indirections are immutable, returns 2.
+ * Otherwise, when the type has const/inout indirections, returns 1.
+ *
+ * Params:
+ *      isRef = if true, check `ref t`; otherwise, check just `t`
+ *      t = the type that is being checked
+ */
+int mutabilityOfType(bool isRef, Type t)
+{
+    if (isRef)
+    {
+        if (t.mod & MODFlags.immutable_)
+            return 2;
+        if (t.mod & (MODFlags.const_ | MODFlags.wild))
+            return 1;
+        return 0;
+    }
+
+    t = t.baseElemOf();
+
+    if (!t.hasPointers() || t.mod & MODFlags.immutable_)
+        return 2;
+
+    /* Accept immutable(T)[] and immutable(T)* as being strongly pure
+     */
+    if (t.ty == Tarray || t.ty == Tpointer)
+    {
+        Type tn = t.nextOf().toBasetype();
+        if (tn.mod & MODFlags.immutable_)
+            return 2;
+        if (tn.mod & (MODFlags.const_ | MODFlags.wild))
+            return 1;
+    }
+
+    /* The rest of this is too strict; fix later.
+     * For example, the only pointer members of a struct may be immutable,
+     * which would maintain strong purity.
+     * (Just like for dynamic arrays and pointers above.)
+     */
+    if (t.mod & (MODFlags.const_ | MODFlags.wild))
+        return 1;
+
+    /* Should catch delegates and function pointers, and fold in their purity
+     */
+    return 0;
+}
+
+/********************************************
+ * Set 'purity' field of 'typeFunction'.
+ * Do this lazily, as the parameter types might be forward referenced.
+ */
+void purityLevel(TypeFunction typeFunction)
+{
+    TypeFunction tf = typeFunction;
+    if (tf.purity != PURE.fwdref)
+        return;
+
+    typeFunction.purity = PURE.const_; // assume strong until something weakens it
+
+    /* Evaluate what kind of purity based on the modifiers for the parameters
+     */
+    foreach (i, fparam; tf.parameterList)
+    {
+        Type t = fparam.type;
+        if (!t)
+            continue;
+
+        if (fparam.storageClass & (STC.lazy_ | STC.out_))
+        {
+            typeFunction.purity = PURE.weak;
+            break;
+        }
+        const pref = (fparam.storageClass & STC.ref_) != 0;
+        if (mutabilityOfType(pref, t) == 0)
+            typeFunction.purity = PURE.weak;
+    }
+
+    tf.purity = typeFunction.purity;
 }
 
 /******************************************
@@ -486,22 +670,218 @@ Expression typeToExpression(Type t)
     }
 }
 
+/*************************************
+ * https://issues.dlang.org/show_bug.cgi?id=14488
+ * Check if the inner most base type is complex or imaginary.
+ * Should only give alerts when set to emit transitional messages.
+ * Params:
+ *  type = type to check
+ *  loc = The source location.
+ *  sc = scope of the type
+ */
+extern (D) bool checkComplexTransition(Type type, Loc loc, Scope* sc)
+{
+    if (sc.isDeprecated())
+        return false;
+    // Don't complain if we're inside a template constraint
+    // https://issues.dlang.org/show_bug.cgi?id=21831
+    if (sc.inTemplateConstraint)
+        return false;
+
+    Type t = type.baseElemOf();
+    while (t.ty == Tpointer || t.ty == Tarray)
+        t = t.nextOf().baseElemOf();
+
+    // Basetype is an opaque enum, nothing to check.
+    if (t.ty == Tenum && !(cast(TypeEnum)t).sym.memtype)
+        return false;
+
+    if (t.isImaginary() || t.isComplex())
+    {
+        if (sc.inCfile)
+            return true;            // complex/imaginary not deprecated in C code
+        Type rt;
+        switch (t.ty)
+        {
+        case Tcomplex32:
+        case Timaginary32:
+            rt = Type.tfloat32;
+            break;
+
+        case Tcomplex64:
+        case Timaginary64:
+            rt = Type.tfloat64;
+            break;
+
+        case Tcomplex80:
+        case Timaginary80:
+            rt = Type.tfloat80;
+            break;
+
+        default:
+            assert(0);
+        }
+        // @@@DEPRECATED_2.117@@@
+        // Deprecated in 2.097 - Can be made an error from 2.117.
+        // The deprecation period is longer than usual as `cfloat`,
+        // `cdouble`, and `creal` were quite widely used.
+        if (t.isComplex())
+        {
+            deprecation(loc, "use of complex type `%s` is deprecated, use `std.complex.Complex!(%s)` instead",
+                type.toChars(), rt.toChars());
+            return true;
+        }
+        else
+        {
+            deprecation(loc, "use of imaginary type `%s` is deprecated, use `%s` instead",
+                type.toChars(), rt.toChars());
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Look for the index of parameter `ident` in the parameter list
+ *
+ * Params:
+ *   tf = function type
+ *   ident = identifier of parameter to search for
+ * Returns: index of parameter with name `ident` or -1 if not found
+ */
+private extern(D) ptrdiff_t findParameterIndex(TypeFunction tf, Identifier ident)
+{
+    foreach (i, p; tf.parameterList)
+    {
+        if (p.ident == ident)
+            return i;
+    }
+    return -1;
+}
+
+/*********************************
+ * Append error message to buf.
+ * Input:
+ *  buf = message sink
+ *  format = printf format
+ */
+private extern(C) void getMatchError(ref OutBuffer buf, const(char)* format, ...)
+{
+    if (global.gag && !global.params.v.showGaggedErrors)
+        return;
+    va_list ap;
+    va_start(ap, format);
+    buf.vprintf(format, ap);
+    va_end(ap);
+}
+
+/********************************
+ * Convert an `argumentList`, which may contain named arguments, into
+ * a list of arguments in the order of the parameter list.
+ *
+ * Params:
+ *   tf = function type
+ *      argumentList = array of function arguments
+ *      buf = if not null, append error message to it
+ * Returns: re-ordered argument list, or `null` on error
+ */
+extern(D) Expressions* resolveNamedArgs(TypeFunction tf, ArgumentList argumentList, OutBuffer* buf)
+{
+    Expression[] args = argumentList.arguments ? (*argumentList.arguments)[] : null;
+    ArgumentLabel[] names = argumentList.names ? (*argumentList.names)[] : null;
+    const nParams = tf.parameterList.length(); // cached because O(n)
+    auto newArgs = new Expressions(nParams);
+    newArgs.zero();
+    size_t ci = 0;
+    bool hasNamedArgs = false;
+    const bool isVariadic = tf.parameterList.varargs != VarArg.none;
+    foreach (i, arg; args)
+    {
+        if (!arg)
+        {
+            ci++;
+            continue;
+        }
+        auto name = i < names.length ? names[i].name : null;
+        if (name)
+        {
+            hasNamedArgs = true;
+            const pi = tf.findParameterIndex(name);
+            if (pi == -1)
+            {
+                if (buf)
+                    getMatchError(*buf, "no parameter named `%s`", name.toChars());
+                return null;
+            }
+            ci = pi;
+        }
+        if (ci >= newArgs.length)
+        {
+            if (!isVariadic)
+            {
+                // Without named args, let the caller diagnose argument overflow
+                if (hasNamedArgs && buf)
+                    getMatchError(*buf, "argument `%s` goes past end of parameter list", arg.toChars());
+                return null;
+            }
+            while (ci >= newArgs.length)
+                newArgs.push(null);
+        }
+
+        if ((*newArgs)[ci])
+        {
+            if (buf)
+                getMatchError(*buf, "parameter `%s` assigned twice", tf.parameterList[ci].toChars());
+            return null;
+        }
+        (*newArgs)[ci++] = arg;
+    }
+    foreach (i, arg; (*newArgs)[])
+    {
+        if (arg || tf.parameterList[i].defaultArg)
+            continue;
+
+        if (isVariadic && i + 1 == newArgs.length)
+            continue;
+
+        // dtemplate sets `defaultArg=null` to avoid semantic on default arguments,
+        // don't complain about missing arguments in that case
+        if (tf.incomplete)
+            continue;
+
+        if (buf)
+            getMatchError(*buf, "missing argument for parameter #%d: `%s`",
+                          i + 1, parameterToChars(tf.parameterList[i], tf, false));
+        return null;
+    }
+    // strip trailing nulls from default arguments
+    size_t e = newArgs.length;
+    while (e > 0 && (*newArgs)[e - 1] is null)
+    {
+        --e;
+    }
+    newArgs.setDim(e);
+    return newArgs;
+}
+
 /********************************
  * 'args' are being matched to function type 'tf'
  * Determine match level.
  * Params:
+ *      fd = function being called, if a symbol
  *      tf = function type
  *      tthis = type of `this` pointer, null if not member function
  *      argumentList = arguments to function call
  *      flag = 1: performing a partial ordering match
- *      pMessage = address to store error message, or null
+ *      errorHelper = delegate to call for error messages
  *      sc = context
  * Returns:
  *      MATCHxxxx
  */
-extern (D) MATCH callMatch(TypeFunction tf, Type tthis, ArgumentList argumentList, int flag = 0, const(char)** pMessage = null, Scope* sc = null)
+extern (D) MATCH callMatch(FuncDeclaration fd, TypeFunction tf, Type tthis, ArgumentList argumentList,
+        int flag = 0, void delegate(const(char)*) scope errorHelper = null, Scope* sc = null)
 {
-    //printf("TypeFunction::callMatch() %s\n", tf.toChars());
+    //printf("callMatch() fd: %s, tf: %s\n", fd ? fd.ident.toChars() : "null", toChars(tf));
     MATCH match = MATCH.exact; // assume exact match
     ubyte wildmatch = 0;
 
@@ -542,7 +922,7 @@ extern (D) MATCH callMatch(TypeFunction tf, Type tthis, ArgumentList argumentLis
         {
             // suppress early exit if an error message is wanted,
             // so we can check any matching args are valid
-            if (!pMessage)
+            if (!errorHelper)
                 return MATCH.nomatch;
         }
         // too many args; no match
@@ -552,18 +932,26 @@ extern (D) MATCH callMatch(TypeFunction tf, Type tthis, ArgumentList argumentLis
     // https://issues.dlang.org/show_bug.cgi?id=22997
     if (parameterList.varargs == VarArg.none && nparams > argumentList.length && !parameterList.hasDefaultArgs)
     {
-        OutBuffer buf;
-        buf.printf("too few arguments, expected %d, got %d", cast(int)nparams, cast(int)argumentList.length);
-        if (pMessage)
-            *pMessage = buf.extractChars();
+        if (errorHelper)
+        {
+            OutBuffer buf;
+            buf.printf("too few arguments, expected %d, got %d", cast(int)nparams, cast(int)argumentList.length);
+            errorHelper(buf.peekChars());
+        }
         return MATCH.nomatch;
     }
-    auto resolvedArgs = tf.resolveNamedArgs(argumentList, pMessage);
+    const(char)* failMessage;
+    const(char)** pMessage = errorHelper ? &failMessage : null;
+    OutBuffer buf;
+    auto resolvedArgs = tf.resolveNamedArgs(argumentList, errorHelper ? &buf : null);
     Expression[] args;
     if (!resolvedArgs)
     {
-        if (!pMessage || *pMessage)
+        if (buf.length)
+        {
+            errorHelper(buf.peekChars());
             return MATCH.nomatch;
+        }
 
         // if no message was provided, it was because of overflow which will be diagnosed below
         match = MATCH.nomatch;
@@ -621,7 +1009,12 @@ extern (D) MATCH callMatch(TypeFunction tf, Type tthis, ArgumentList argumentLis
             Expression arg = args[u];
             if (!arg)
                 continue; // default argument
-            m = argumentMatchParameter(tf, p, arg, wildmatch, flag, sc, pMessage);
+            m = argumentMatchParameter(fd, tf, p, arg, wildmatch, flag, sc, pMessage);
+            if (failMessage)
+            {
+                buf.reset();
+                buf.writestring(failMessage);
+            }
         }
         else if (p.defaultArg)
             continue;
@@ -638,29 +1031,39 @@ extern (D) MATCH callMatch(TypeFunction tf, Type tthis, ArgumentList argumentLis
         L1:
             if (parameterList.varargs == VarArg.typesafe && u + 1 == nparams) // if last varargs param
             {
-                auto trailingArgs = args[u .. $];
+                Expression[] trailingArgs;
+                if (args.length >= u)
+                    trailingArgs = args[u .. $];
                 if (auto vmatch = matchTypeSafeVarArgs(tf, p, trailingArgs, pMessage))
                     return vmatch < match ? vmatch : match;
                 // Error message was already generated in `matchTypeSafeVarArgs`
+                if (failMessage)
+                    errorHelper(failMessage);
                 return MATCH.nomatch;
             }
-            if (pMessage && u >= args.length)
-                *pMessage = tf.getMatchError("missing argument for parameter #%d: `%s`",
-                    u + 1, parameterToChars(p, tf, false));
-            // If an error happened previously, `pMessage` was already filled
-            else if (pMessage && !*pMessage)
-                *pMessage = tf.getParamError(args[u], p);
+            if (errorHelper)
+            {
+                if (u >= args.length)
+                    getMatchError(buf, "missing argument for parameter #%d: `%s`",
+                                  u + 1, parameterToChars(p, tf, false));
+                // If an error happened previously, `pMessage` was already filled
+                else if (buf.length == 0)
+                    buf.writestring(tf.getParamError(args[u], p));
 
+                errorHelper(buf.peekChars());
+            }
             return MATCH.nomatch;
         }
         if (m < match)
             match = m; // pick worst match
     }
 
-    if (pMessage && !parameterList.varargs && args.length > nparams)
+    if (errorHelper && !parameterList.varargs && args.length > nparams)
     {
         // all parameters had a match, but there are surplus args
-        *pMessage = tf.getMatchError("expected %d argument(s), not %d", nparams, args.length);
+        OutBuffer buf2;
+        getMatchError(buf2, "expected %d argument(s), not %d", nparams, args.length);
+        errorHelper(buf2.extractChars());
         return MATCH.nomatch;
     }
     //printf("match = %d\n", match);
@@ -673,83 +1076,92 @@ extern (D) MATCH callMatch(TypeFunction tf, Type tthis, ArgumentList argumentLis
  *
  * This is done by seeing if a call to the copy constructor can be made:
  * ```
- * typeof(tprm) __copytmp;
- * copytmp.__copyCtor(arg);
+ * typeof(tprm) __copytemp;
+ * copytemp.__copyCtor(arg);
  * ```
  */
 private extern(D) bool isCopyConstructorCallable (StructDeclaration argStruct,
     Expression arg, Type tprm, Scope* sc, const(char)** pMessage)
 {
-    auto tmp = new VarDeclaration(arg.loc, tprm, Identifier.generateId("__copytmp"), null);
+    //printf("isCopyConstructorCallable() argStruct: %s arg: %s tprm: %s\n", argStruct.toChars(), toChars(arg), toChars(tprm));
+    auto tmp = new VarDeclaration(arg.loc, tprm, Identifier.generateId("__copytemp"), null);
     tmp.storage_class = STC.rvalue | STC.temp | STC.ctfe;
     tmp.dsymbolSemantic(sc);
     Expression ve = new VarExp(arg.loc, tmp);
     Expression e = new DotIdExp(arg.loc, ve, Id.ctor);
     e = new CallExp(arg.loc, e, arg);
     //printf("e = %s\n", e.toChars());
-    if (.trySemantic(e, sc))
+    if (dmd.expressionsem.trySemantic(e, sc))
         return true;
 
-    if (pMessage)
-    {
-        /* https://issues.dlang.org/show_bug.cgi?id=22202
-         *
-         * If a function was deduced by semantic on the CallExp,
-         * it means that resolveFuncCall completed succesfully.
-         * Therefore, there exists a callable copy constructor,
-         * however, it cannot be called because scope constraints
-         * such as purity, safety or nogc.
-         */
-        OutBuffer buf;
-        auto callExp = e.isCallExp();
-        if (auto f = callExp.f)
-        {
-            char[] s;
-            if (!f.isPure && sc.func.setImpure())
-                s ~= "pure ";
-            if (!f.isSafe() && !f.isTrusted() && sc.setUnsafe())
-                s ~= "@safe ";
-            if (!f.isNogc && sc.func.setGC(arg.loc, null))
-                s ~= "nogc ";
-            if (f.isDisabled() && !f.isGenerated())
-            {
-                /* https://issues.dlang.org/show_bug.cgi?id=24301
-                 * Copy constructor is explicitly disabled
-                 */
-                buf.printf("`%s` copy constructor cannot be used because it is annotated with `@disable`",
-                    f.type.toChars());
-            }
-            else if (s)
-            {
-                s[$-1] = '\0';
-                buf.printf("`%s` copy constructor cannot be called from a `%s` context", f.type.toChars(), s.ptr);
-            }
-            else if (f.isGenerated() && f.isDisabled())
-            {
-                /* https://issues.dlang.org/show_bug.cgi?id=23097
-                 * Compiler generated copy constructor failed.
-                 */
-                buf.printf("generating a copy constructor for `struct %s` failed, therefore instances of it are uncopyable",
-                           argStruct.toChars());
-            }
-            else
-            {
-                /* Although a copy constructor may exist, no suitable match was found.
-                 * i.e: `inout` constructor creates `const` object, not mutable.
-                 * Fallback to using the original generic error before https://issues.dlang.org/show_bug.cgi?id=22202.
-                 */
-                goto Lnocpctor;
-            }
-        }
-        else
-        {
-        Lnocpctor:
-            buf.printf("`struct %s` does not define a copy constructor for `%s` to `%s` copies",
-                       argStruct.toChars(), arg.type.toChars(), tprm.toChars());
-        }
+    if (!pMessage)
+        return false;
 
+    /* https://issues.dlang.org/show_bug.cgi?id=22202
+     *
+     * If a function was deduced by semantic on the CallExp,
+     * it means that resolveFuncCall completed succesfully.
+     * Therefore, there exists a callable copy constructor,
+     * however, it cannot be called because scope constraints
+     * such as purity, safety or nogc.
+     */
+    OutBuffer buf;
+    auto callExp = e.isCallExp();
+
+    bool nocpctor()
+    {
+        buf.printf("`struct %s` does not define a copy constructor for `%s` to `%s` copies",
+                   argStruct.toChars(), arg.type.toChars(), tprm.toChars());
         *pMessage = buf.extractChars();
+        return false;
     }
+
+    auto f = callExp.f;
+    if (!f)
+        return nocpctor();
+
+    if (f.isDisabled() && !f.isGenerated)
+    {
+        /* https://issues.dlang.org/show_bug.cgi?id=24301
+         * Copy constructor is explicitly disabled
+         */
+        buf.printf("`%s` copy constructor cannot be used because it is annotated with `@disable`",
+            f.type.toChars());
+        *pMessage = buf.extractChars();
+        return false;
+    }
+
+    bool bpure = !f.isPure && sc.func.setImpure(arg.loc, null);
+    bool bsafe = !f.isSafe() && !f.isTrusted() && sc.setUnsafe(false, arg.loc, null);
+    bool bnogc = !f.isNogc && sc.setGC(sc.func, arg.loc, null);
+    if (bpure | bsafe | bnogc)
+    {
+        const nullptr = "".ptr;
+        buf.printf("`%s` copy constructor cannot be called from a `%s%s%s` context",
+            f.type.toChars(),
+            bpure ? "pure " .ptr : nullptr,
+            bsafe ? "@safe ".ptr : nullptr,
+            bnogc ? "nogc"  .ptr : nullptr);
+    }
+    else if (f.isGenerated && f.isDisabled())
+    {
+        /* https://issues.dlang.org/show_bug.cgi?id=23097
+         * Compiler generated copy constructor failed.
+         */
+        buf.printf("generating a copy constructor for `struct %s` failed, therefore instances of it are uncopyable",
+                   argStruct.toChars());
+    }
+    else
+    {
+        /* Although a copy constructor may exist, no suitable match was found.
+         * i.e: `inout` constructor creates `const` object, not mutable.
+         * Fallback to using the original generic error before https://issues.dlang.org/show_bug.cgi?id=22202.
+         */
+        return nocpctor();
+    }
+
+    *pMessage = buf.extractChars();
+
     return false;
 }
 
@@ -758,25 +1170,28 @@ private extern(D) bool isCopyConstructorCallable (StructDeclaration argStruct,
  *
  * This function is called by `TypeFunction.callMatch` while iterating over
  * the list of parameter. Here we check if `arg` is a match for `p`,
- * which is mostly about checking if `arg.type` converts to `p`'s type
+ * which is mostly about checking if `arg.type` converts to type of `p`
  * and some check about value reference.
  *
  * Params:
+ *   fd = the function being called if symbol, null if not
  *   tf = The `TypeFunction`, only used for error reporting
  *   p = The parameter of `tf` being matched
  *   arg = Argument being passed (bound) to `p`
  *   wildmatch = Wild (`inout`) matching level, derived from the full argument list
- *   flag = A non-zero value means we're doing a partial ordering check
+ *   flag = A non-zero value means we are doing a partial ordering check
  *          (no value semantic check)
  *   sc = Scope we are in
  *   pMessage = A buffer to write the error in, or `null`
  *
  * Returns: Whether `trailingArgs` match `p`.
  */
-private extern(D) MATCH argumentMatchParameter (TypeFunction tf, Parameter p,
+private extern(D) MATCH argumentMatchParameter (FuncDeclaration fd, TypeFunction tf, Parameter p,
     Expression arg, ubyte wildmatch, int flag, Scope* sc, const(char)** pMessage)
 {
-    //printf("arg: %s, type: %s\n", arg.toChars(), arg.type.toChars());
+    static if (0)
+    printf("argumentMatchParameter() sc: %p, fd: %s, tf: %s, p: %s, arg: %s, arg.type: %s\n",
+        sc, fd ? fd.ident.toChars() : "null", tf.toChars(), parameterToChars(p, tf, false), arg.toChars(), arg.type.toChars());
     MATCH m;
     Type targ = arg.type;
     Type tprm = wildmatch ? p.type.substWildTo(wildmatch) : p.type;
@@ -791,126 +1206,161 @@ private extern(D) MATCH argumentMatchParameter (TypeFunction tf, Parameter p,
     else
     {
         const isRef = p.isReference();
-        StructDeclaration argStruct, prmStruct;
 
-        // first look for a copy constructor
-        if (arg.isLvalue() && !isRef && targ.ty == Tstruct && tprm.ty == Tstruct)
+        StructDeclaration argStruct, prmStruct;
+        if (targ.ty == Tstruct && tprm.ty == Tstruct)
         {
             // if the argument and the parameter are of the same unqualified struct type
             argStruct = (cast(TypeStruct)targ).sym;
             prmStruct = (cast(TypeStruct)tprm).sym;
+
+            /* if both a copy constructor and move constructor exist, then match
+             * the lvalue to the copy constructor only and the rvalue to the move constructor
+             * only
+             */
+            if (argStruct == prmStruct && fd)
+            {
+                if (auto cfd = fd.isCtorDeclaration())
+                {
+                    /* Get struct that constructor is making
+                     */
+
+                    auto t1 = cfd.type.toBasetype();
+                    auto t2 = t1.nextOf();
+                    auto t3 = t2.isTypeStruct();
+                    if (t3)
+                    {
+                    auto ctorStruct = t3.sym;
+//                    StructDeclaration ctorStruct = cfd.type.toBasetype().nextOf().isTypeStruct().sym;
+
+                    if (prmStruct == ctorStruct && ctorStruct.hasCopyCtor && ctorStruct.hasMoveCtor)
+                    {
+                        if (cfd.isCpCtor && !arg.isLvalue())
+                            return MATCH.nomatch;       // copy constructor is only for lvalues
+                        if (cfd.isMoveCtor && arg.isLvalue())
+                            return MATCH.nomatch;       // move constructor is only for rvalues
+                    }
+                    }
+                }
+            }
         }
 
         // check if the copy constructor may be called to copy the argument
-        if (argStruct && argStruct == prmStruct && argStruct.hasCopyCtor)
+        if (arg.isLvalue() && !isRef && argStruct && argStruct == prmStruct && argStruct.hasCopyCtor &&
+            !isCopyConstructorCallable(argStruct, arg, tprm, sc, pMessage))
         {
-            if (!isCopyConstructorCallable(argStruct, arg, tprm, sc, pMessage))
-                return MATCH.nomatch;
-            m = MATCH.exact;
+            return MATCH.nomatch;
         }
         else
         {
             import dmd.dcast : cimplicitConvTo;
-            m = (sc && sc.flags & SCOPE.Cfile) ? arg.cimplicitConvTo(tprm) : arg.implicitConvTo(tprm);
+            m = (sc && sc.inCfile) ? arg.cimplicitConvTo(tprm) : arg.implicitConvTo(tprm);
         }
     }
 
     // Non-lvalues do not match ref or out parameters
-    if (p.isReference())
+    if (!p.isReference())
+        return m;
+
+    // https://issues.dlang.org/show_bug.cgi?id=13783
+    // Don't use toBasetype() to handle enum types.
+    Type ta = targ;
+    Type tp = tprm;
+    //printf("fparam[%d] ta = %s, tp = %s\n", u, ta.toChars(), tp.toChars());
+
+    if (m && !arg.isLvalue())
     {
-        // https://issues.dlang.org/show_bug.cgi?id=13783
-        // Don't use toBasetype() to handle enum types.
-        Type ta = targ;
-        Type tp = tprm;
-        //printf("fparam[%d] ta = %s, tp = %s\n", u, ta.toChars(), tp.toChars());
-
-        if (m && !arg.isLvalue())
-        {
-            if (p.storageClass & STC.out_)
-            {
-                if (pMessage) *pMessage = tf.getParamError(arg, p);
-                return MATCH.nomatch;
-            }
-
-            if (arg.op == EXP.string_ && tp.ty == Tsarray)
-            {
-                if (ta.ty != Tsarray)
-                {
-                    Type tn = tp.nextOf().castMod(ta.nextOf().mod);
-                    dinteger_t dim = (cast(StringExp)arg).len;
-                    ta = tn.sarrayOf(dim);
-                }
-            }
-            else if (arg.op == EXP.slice && tp.ty == Tsarray)
-            {
-                // Allow conversion from T[lwr .. upr] to ref T[upr-lwr]
-                if (ta.ty != Tsarray)
-                {
-                    Type tn = ta.nextOf();
-                    dinteger_t dim = (cast(TypeSArray)tp).dim.toUInteger();
-                    ta = tn.sarrayOf(dim);
-                }
-            }
-            else if (p.storageClass & STC.constscoperef)
-            {
-                // Allow converting a literal to an `in` which is `ref`
-                if (arg.op == EXP.arrayLiteral && tp.ty == Tsarray)
-                {
-                    Type tn = tp.nextOf();
-                    dinteger_t dim = (cast(TypeSArray)tp).dim.toUInteger();
-                    ta = tn.sarrayOf(dim);
-                }
-
-                // Need to make this a rvalue through a temporary
-                m = MATCH.convert;
-            }
-            else if (global.params.rvalueRefParam != FeatureState.enabled ||
-                     p.storageClass & STC.out_ ||
-                     !arg.type.isCopyable())  // can't copy to temp for ref parameter
-            {
-                if (pMessage) *pMessage = tf.getParamError(arg, p);
-                return MATCH.nomatch;
-            }
-            else
-            {
-                /* in functionParameters() we'll convert this
-                 * rvalue into a temporary
-                 */
-                m = MATCH.convert;
-            }
-        }
-
-        /* If the match is not already perfect or if the arg
-           is not a lvalue then try the `alias this` chain
-           see  https://issues.dlang.org/show_bug.cgi?id=15674
-           and https://issues.dlang.org/show_bug.cgi?id=21905
-        */
-        if (ta != tp || !arg.isLvalue())
-        {
-            Type firsttab = ta.toBasetype();
-            while (1)
-            {
-                Type tab = ta.toBasetype();
-                Type tat = tab.aliasthisOf();
-                if (!tat || !tat.implicitConvTo(tprm))
-                    break;
-                if (tat == tab || tat == firsttab)
-                    break;
-                ta = tat;
-            }
-        }
-
-        /* A ref variable should work like a head-const reference.
-         * e.g. disallows:
-         *  ref T      <- an lvalue of const(T) argument
-         *  ref T[dim] <- an lvalue of const(T[dim]) argument
-         */
-        if (!ta.constConv(tp))
+        if (p.storageClass & STC.out_)
         {
             if (pMessage) *pMessage = tf.getParamError(arg, p);
             return MATCH.nomatch;
         }
+
+        if (arg.op == EXP.string_ && tp.ty == Tsarray)
+        {
+            if (ta.ty != Tsarray)
+            {
+                Type tn = tp.nextOf().castMod(ta.nextOf().mod);
+                dinteger_t dim = (cast(StringExp)arg).len;
+                ta = tn.sarrayOf(dim);
+            }
+        }
+        else if (arg.op == EXP.slice && tp.ty == Tsarray)
+        {
+            // Allow conversion from T[lwr .. upr] to ref T[upr-lwr]
+            if (ta.ty != Tsarray)
+            {
+                Type tn = ta.nextOf();
+                dinteger_t dim = (cast(TypeSArray)tp).dim.toUInteger();
+                ta = tn.sarrayOf(dim);
+            }
+        }
+        else if (p.storageClass & STC.constscoperef)
+        {
+            // Allow converting a literal to an `in` which is `ref`
+            if (arg.op == EXP.arrayLiteral && tp.ty == Tsarray)
+            {
+                Type tn = tp.nextOf();
+                dinteger_t dim = (cast(TypeSArray)tp).dim.toUInteger();
+                ta = tn.sarrayOf(dim);
+            }
+
+            // Need to make this a rvalue through a temporary
+            m = MATCH.convert;
+        }
+        else if (!(sc && sc.previews.rvalueRefParam) ||
+                 p.storageClass & STC.out_ ||
+                 !arg.type.isCopyable())  // can't copy to temp for ref parameter
+        {
+            if (pMessage) *pMessage = tf.getParamError(arg, p);
+            return MATCH.nomatch;
+        }
+        else
+        {
+            /* in functionParameters() we'll convert this
+             * rvalue into a temporary
+             */
+            m = MATCH.convert;
+        }
     }
+
+    /* If the match is not already perfect or if the arg
+       is not a lvalue then try the `alias this` chain
+       see  https://issues.dlang.org/show_bug.cgi?id=15674
+       and https://issues.dlang.org/show_bug.cgi?id=21905
+    */
+    if (ta != tp || !arg.isLvalue())
+    {
+        Type firsttab = ta.toBasetype();
+        while (1)
+        {
+            Type tab = ta.toBasetype();
+            Type tat = tab.aliasthisOf();
+            if (!tat || !tat.implicitConvTo(tprm))
+                break;
+            if (tat == tab || tat == firsttab)
+                break;
+            ta = tat;
+        }
+    }
+
+    /* A ref variable should work like a head-const reference.
+     * e.g. disallows:
+     *  ref T      <- an lvalue of const(T) argument
+     *  ref T[dim] <- an lvalue of const(T[dim]) argument
+     */
+    if (!ta.constConv(tp))
+    {
+        if (pMessage) *pMessage = tf.getParamError(arg, p);
+        return MATCH.nomatch;
+    }
+
+    if (arg.isBitField())
+    {
+        if (pMessage) *pMessage = tf.getParamError(arg, p);
+        return MATCH.nomatch;
+    }
+
     return m;
 }
 
@@ -924,13 +1374,21 @@ private const(char)* getParamError(TypeFunction tf, Expression arg, Parameter pa
     // when comparing the type with strcmp, we need to drop the qualifier
     bool qual = !arg.type.mutableOf().equals(par.type.mutableOf()) &&
         strcmp(arg.type.mutableOf().toChars(), par.type.mutableOf().toChars()) == 0;
-    auto at = qual ? arg.type.toPrettyChars(true) : arg.type.toChars();
     OutBuffer buf;
-    // only mention rvalue if it's relevant
-    const rv = !arg.isLvalue() && par.isReference();
-    buf.printf("cannot pass %sargument `%s` of type `%s` to parameter `%s`",
-        rv ? "rvalue ".ptr : "".ptr, arg.toChars(), at,
-        parameterToChars(par, tf, qual));
+    // only mention rvalue or bitfield if it's relevant
+    if (arg.isBitField())
+    {
+        buf.printf("cannot pass bitfield argument `%s` to parameter `%s`",
+                   arg.toErrMsg(), parameterToChars(par, tf, qual));
+    }
+    else
+    {
+        auto at = qual ? arg.type.toPrettyChars(true) : arg.type.toChars();
+        const rv = !arg.isLvalue() && par.isReference() && !(par.storageClass & STC.constscoperef);
+        buf.printf("cannot pass %sargument `%s` of type `%s` to parameter `%s`",
+            rv ? "rvalue ".ptr : "".ptr, arg.toErrMsg(), at,
+            parameterToChars(par, tf, qual));
+    }
     return buf.extractChars();
 }
 
@@ -961,8 +1419,12 @@ private extern(D) MATCH matchTypeSafeVarArgs(TypeFunction tf, Parameter p,
         if (sz != trailingArgs.length)
         {
             if (pMessage)
-                *pMessage = tf.getMatchError("expected %llu variadic argument(s), not %zu",
+            {
+                OutBuffer buf;
+                getMatchError(buf, "expected %llu variadic argument(s), not %zu",
                     sz, trailingArgs.length);
+                *pMessage = buf.extractChars();
+            }
             return MATCH.nomatch;
         }
         goto case Tarray;
@@ -1012,10 +1474,437 @@ private extern(D) MATCH matchTypeSafeVarArgs(TypeFunction tf, Parameter p,
     default:
         // We can have things as `foo(int[int] wat...)` but they only match
         // with an associative array proper.
-        if (pMessage && trailingArgs.length) *pMessage = tf.getParamError(trailingArgs[0], p);
+        if (!pMessage) {}
+        else if (!trailingArgs.length)
+        {
+            OutBuffer buf;
+            getMatchError(buf, "expected an argument for parameter `%s`",
+                parameterToChars(p, tf, false));
+            *pMessage = buf.extractChars();
+        }
+        else
+            *pMessage = tf.getParamError(trailingArgs[0], p);
+
         return MATCH.nomatch;
     }
 }
+
+/// Compute cached type properties for `TypeStruct`
+void determineTypeProperties(StructDeclaration sd)
+{
+    import dmd.dsymbolsem : hasPointers;
+    if (sd.computedTypeProperties)
+        return;
+    foreach (vd; sd.fields)
+    {
+        if (vd.storage_class & STC.ref_ || vd.hasPointers())
+        {
+            sd.hasPointerField = true;
+            sd.hasUnsafeBitpatterns = true;
+        }
+
+        if (vd._init && vd._init.isVoidInitializer() && vd.hasPointers())
+            sd.hasVoidInitPointers = true;
+
+        if (vd.storage_class & STC.system || vd.type.hasUnsafeBitpatterns())
+            sd.hasUnsafeBitpatterns = true;
+
+        if (!vd._init && vd.type.hasVoidInitPointers())
+            sd.hasVoidInitPointers = true;
+
+        if (vd.type.hasInvariant())
+            sd.hasFieldWithInvariant = true;
+    }
+    sd.computedTypeProperties = true;
+}
+
+/***************************************
+ * Return !=0 if type has pointers that need to
+ * be scanned by the GC during a collection cycle.
+ */
+bool hasPointers(Type t)
+{
+    bool visitType(Type _)              { return false; }
+    bool visitDArray(TypeDArray _)      { return true; }
+    bool visitAArray(TypeAArray _)      { return true; }
+    bool visitPointer(TypePointer _)    { return true; }
+    bool visitDelegate(TypeDelegate _)  { return true; }
+    bool visitClass(TypeClass _)        { return true; }
+    bool visitEnum(TypeEnum t)          { return t.memType().hasPointers(); }
+
+    /* Although null isn't dereferencable, treat it as a pointer type for
+     * attribute inference, generic code, etc.
+     */
+    bool visitNull(TypeNull _)          { return true; }
+
+    bool visitSArray(TypeSArray t)
+    {
+        /* Don't want to do this, because:
+         *    struct S { T* array[0]; }
+         * may be a variable length struct.
+         */
+        //if (dim.toInteger() == 0)
+        //    return false;
+
+        if (t.next.ty == Tvoid)
+        {
+            // Arrays of void contain arbitrary data, which may include pointers
+            return true;
+        }
+        else
+            return t.next.hasPointers();
+    }
+
+    bool visitStruct(TypeStruct t)
+    {
+        StructDeclaration sym = t.sym;
+
+        if (sym.members && !sym.determineFields() && sym.type != Type.terror)
+            error(sym.loc, "no size because of forward references");
+
+        sym.determineTypeProperties();
+        return sym.hasPointerField;
+    }
+
+
+    switch(t.ty)
+    {
+        default:            return visitType(t);
+        case Tsarray:       return visitSArray(t.isTypeSArray());
+        case Tarray:        return visitDArray(t.isTypeDArray());
+        case Taarray:       return visitAArray(t.isTypeAArray());
+        case Tpointer:      return visitPointer(t.isTypePointer());
+        case Tdelegate:     return visitDelegate(t.isTypeDelegate());
+        case Tstruct:       return visitStruct(t.isTypeStruct());
+        case Tenum:         return visitEnum(t.isTypeEnum());
+        case Tclass:        return visitClass(t.isTypeClass());
+        case Tnull:         return visitNull(t.isTypeNull());
+    }
+}
+
+/**************************************
+ * Returns an indirect type one step from t.
+ */
+Type getIndirection(Type t)
+{
+    t = t.baseElemOf();
+    if (t.ty == Tarray || t.ty == Tpointer)
+        return t.nextOf().toBasetype();
+    if (t.ty == Taarray || t.ty == Tclass)
+        return t;
+    if (t.ty == Tstruct)
+        return t.hasPointers() ? t : null; // TODO
+
+    // should consider TypeDelegate?
+    return null;
+}
+
+uinteger_t size(Type t)
+{
+    return size(t, Loc.initial);
+}
+
+uinteger_t size(Type t, Loc loc)
+{
+
+    uinteger_t visitType(Type t)
+    {
+        error(loc, "no size for type `%s`", t.toChars());
+        return SIZE_INVALID;
+    }
+
+    uinteger_t visitBasic(TypeBasic t)
+    {
+        uint size;
+        //printf("TypeBasic::size()\n");
+        switch (t.ty)
+        {
+            case Tint8:
+            case Tuns8:
+                size = 1;
+                break;
+
+            case Tint16:
+            case Tuns16:
+                size = 2;
+                break;
+
+            case Tint32:
+            case Tuns32:
+            case Tfloat32:
+            case Timaginary32:
+                size = 4;
+                break;
+
+            case Tint64:
+            case Tuns64:
+            case Tfloat64:
+            case Timaginary64:
+                size = 8;
+                break;
+
+            case Tfloat80:
+            case Timaginary80:
+                size = target.realsize;
+                break;
+
+            case Tcomplex32:
+                size = 8;
+                break;
+
+            case Tcomplex64:
+            case Tint128:
+            case Tuns128:
+                size = 16;
+                break;
+
+            case Tcomplex80:
+                size = target.realsize * 2;
+                break;
+
+            case Tvoid:
+                //size = Type::size();      // error message
+                size = 1;
+                break;
+
+            case Tbool:
+                size = 1;
+                break;
+
+            case Tchar:
+                size = 1;
+                break;
+
+            case Twchar:
+                size = 2;
+                break;
+
+            case Tdchar:
+                size = 4;
+                break;
+
+            default:
+                assert(0);
+            }
+
+        //printf("TypeBasic::size() = %d\n", size);
+        return size;
+    }
+
+    uinteger_t visitSArray(TypeSArray t)
+    {
+        //printf("TypeSArray::size()\n");
+        const n = t.numberOfElems(loc);
+        const elemsize = t.baseElemOf().size(loc);
+        bool overflow = false;
+        const sz = mulu(n, elemsize, overflow);
+        if (overflow || sz >= uint.max)
+        {
+            if (elemsize != SIZE_INVALID && n != uint.max)
+                error(loc, "static array `%s` size overflowed to %lld", t.toChars(), cast(long)sz);
+            return SIZE_INVALID;
+        }
+        return sz;
+
+    }
+
+    uinteger_t visitTypeQualified(TypeQualified t)
+    {
+        if (t.ty == Ttypeof)
+        {
+            auto type = (cast(TypeTypeof)t).exp.type;
+            if (type)
+                return type.size(loc);
+        }
+
+        error(t.loc, "size of type `%s` is not known", t.toChars());
+        return SIZE_INVALID;
+    }
+
+    switch(t.ty)
+    {
+        default:            return t.isTypeBasic() ? visitBasic(t.isTypeBasic()) : visitType(t);
+        case Ttraits:
+        case Terror:        return SIZE_INVALID;
+        case Tvector:       return t.isTypeVector().basetype.size();
+        case Tsarray:       return visitSArray(t.isTypeSArray());
+        case Tdelegate:
+        case Tarray:        return target.ptrsize * 2;
+        case Tpointer:
+        case Treference:
+        case Tclass:
+        case Taarray:       return target.ptrsize;
+        case Tident:
+        case Tinstance:
+        case Ttypeof:
+        case Treturn:       return visitTypeQualified(cast(TypeQualified)t);
+        case Tstruct:
+        {
+            import dmd.dsymbolsem: size;
+            return t.isTypeStruct().sym.size(loc);
+        }
+        case Tenum:         return t.isTypeEnum().sym.getMemtype(loc).size(loc);
+        case Tnull:         return t.tvoidptr.size(loc);
+        case Tnoreturn:     return 0;
+    }
+}
+
+/*******************************
+ * Determine if converting 'this' to 'to' is an identity operation,
+ * a conversion to const operation, or the types aren't the same.
+ * Returns:
+ *      MATCH.exact      'this' == 'to'
+ *      MATCH.constant      'to' is const
+ *      MATCH.nomatch    conversion to mutable or invariant
+ */
+MATCH constConv(Type from, Type to)
+{
+    MATCH visitType(Type from)
+    {
+        //printf("Type::constConv(this = %s, to = %s)\n", from.toChars(), to.toChars());
+        if (from.equals(to))
+            return MATCH.exact;
+        if (from.ty == to.ty && MODimplicitConv(from.mod, to.mod))
+            return MATCH.constant;
+        return MATCH.nomatch;
+    }
+
+    MATCH visitNext(TypeNext from)
+    {
+        //printf("TypeNext::constConv from = %s, to = %s\n", from.toChars(), to.toChars());
+        if (from.equals(to))
+            return MATCH.exact;
+
+        if (!(from.ty == to.ty && MODimplicitConv(from.mod, to.mod)))
+            return MATCH.nomatch;
+
+        Type tn = to.nextOf();
+        if (!(tn && from.next.ty == tn.ty))
+            return MATCH.nomatch;
+
+        MATCH m;
+        if (to.isConst()) // whole tail const conversion
+        {
+            // Recursive shared level check
+            m = from.next.constConv(tn);
+            if (m == MATCH.exact)
+                m = MATCH.constant;
+        }
+        else
+        {
+            //printf("\tnext => %s, to.next => %s\n", from.next.toChars(), tn.toChars());
+            m = from.next.equals(tn) ? MATCH.constant : MATCH.nomatch;
+        }
+        return m;
+    }
+
+    MATCH visitSArray(TypeSArray from)
+    {
+        if (auto tsa = to.isTypeSArray())
+        {
+            if (!from.dim.equals(tsa.dim))
+                return MATCH.nomatch;
+        }
+        return visitNext(from);
+    }
+
+    MATCH visitAArray(TypeAArray from)
+    {
+        if (auto taa = to.isTypeAArray())
+        {
+            MATCH mindex = from.index.constConv(taa.index);
+            MATCH mkey = from.next.constConv(taa.next);
+            // Pick the worst match
+            return mkey < mindex ? mkey : mindex;
+        }
+        return visitType(from);
+    }
+
+    MATCH visitPointer(TypePointer from)
+    {
+        if (from.next.ty == Tfunction)
+        {
+            if (to.nextOf() && from.next.equals((cast(TypeNext)to).next))
+                return visitType(from);
+            else
+                return MATCH.nomatch;
+        }
+        return visitNext(from);
+    }
+
+    MATCH visitFunction(TypeFunction from)
+    {
+        // Attributes need to match exactly, otherwise it's an implicit conversion
+        if (from.ty != to.ty || !from.attributesEqual(cast(TypeFunction) to))
+            return MATCH.nomatch;
+
+        return visitNext(from);
+    }
+
+    MATCH visitStruct(TypeStruct from)
+    {
+        if (from.equals(to))
+            return MATCH.exact;
+        if (from.ty == to.ty && from.sym == (cast(TypeStruct)to).sym && MODimplicitConv(from.mod, to.mod))
+            return MATCH.constant;
+        return MATCH.nomatch;
+    }
+
+    MATCH visitEnum(TypeEnum from)
+    {
+        if (from.equals(to))
+            return MATCH.exact;
+        if (from.ty == to.ty && from.sym == (cast(TypeEnum)to).sym && MODimplicitConv(from.mod, to.mod))
+            return MATCH.constant;
+        return MATCH.nomatch;
+    }
+
+    MATCH visitClass(TypeClass from)
+    {
+        if (from.equals(to))
+            return MATCH.exact;
+        if (from.ty == to.ty && from.sym == (cast(TypeClass)to).sym && MODimplicitConv(from.mod, to.mod))
+            return MATCH.constant;
+
+        /* Conversion derived to const(base)
+         */
+        int offset = 0;
+        if (to.isBaseOf(from, &offset) && offset == 0 && MODimplicitConv(from.mod, to.mod))
+        {
+            // Disallow:
+            //  derived to base
+            //  inout(derived) to inout(base)
+            if (!to.isMutable() && !to.isWild())
+                return MATCH.convert;
+        }
+
+        return MATCH.nomatch;
+    }
+
+    MATCH visitNoreturn(TypeNoreturn from)
+    {
+        // Either another noreturn or conversion to any type
+        return from.implicitConvTo(to);
+    }
+
+    switch(from.ty)
+    {
+        default:            return visitType(from);
+        case Tsarray:       return visitSArray(from.isTypeSArray());
+        case Taarray:       return visitAArray(from.isTypeAArray());
+        case Treference:
+        case Tdelegate:
+        case Tslice:
+        case Tarray:        return visitNext(cast(TypeNext)from);
+        case Tpointer:      return visitPointer(from.isTypePointer());
+        case Tfunction:     return visitFunction(from.isTypeFunction());
+        case Tstruct:       return visitStruct(from.isTypeStruct());
+        case Tenum:         return visitEnum(from.isTypeEnum());
+        case Tclass:        return visitClass(from.isTypeClass());
+        case Tnoreturn:     return visitNoreturn(from.isTypeNoreturn());
+    }
+}
+
 
 /******************************************
  * Perform semantic analysis on a type.
@@ -1027,7 +1916,7 @@ private extern(D) MATCH matchTypeSafeVarArgs(TypeFunction tf, Parameter p,
  *      `Type` with completed semantic analysis, `Terror` if errors
  *      were encountered
  */
-extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
+Type typeSemantic(Type type, Loc loc, Scope* sc)
 {
     static Type error()
     {
@@ -1051,7 +1940,7 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
 
     Type visitComplex(TypeBasic t)
     {
-        if (!(sc.flags & SCOPE.Cfile))
+        if (!sc.inCfile)
             return visitType(t);
 
         auto tc = getComplexLibraryType(loc, sc, t.ty);
@@ -1225,7 +2114,7 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
         default:
             break;
         }
-        if (tbn.isscope())
+        if (tbn.isScopeClass())
         {
             .error(loc, "cannot have array of scope `%s`", tbn.toChars());
             return error();
@@ -1259,7 +2148,7 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
         default:
             break;
         }
-        if (tn.isscope())
+        if (tn.isScopeClass())
         {
             .error(loc, "cannot have array of scope `%s`", tn.toChars());
             return error();
@@ -1288,7 +2177,19 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
             Expression e;
             Type t;
             Dsymbol s;
-            mtype.index.resolve(loc, sc, e, t, s);
+            Loc indexLoc;
+
+            switch (mtype.index.ty)
+            {
+                case Tident:    indexLoc = mtype.index.isTypeIdentifier().loc;  break;
+                case Tinstance: indexLoc = mtype.index.isTypeInstance().loc;    break;
+                case Ttypeof:   indexLoc = mtype.index.isTypeTypeof().loc;      break;
+                case Treturn:   indexLoc = mtype.index.isTypeReturn().loc;      break;
+                case Tmixin:    indexLoc = mtype.index.isTypeMixin().loc;       break;
+                default: indexLoc = mtype.loc;
+            }
+
+            mtype.index.resolve(indexLoc, sc, e, t, s);
 
             // https://issues.dlang.org/show_bug.cgi?id=15478
             if (s)
@@ -1358,7 +2259,7 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
             // duplicate a part of StructDeclaration::semanticTypeInfoMembers
             //printf("AA = %s, key: xeq = %p, xerreq = %p xhash = %p\n", toChars(), sd.xeq, sd.xerreq, sd.xhash);
 
-            if (sd.xeq && sd.xeq.isGenerated() && sd.xeq._scope && sd.xeq.semanticRun < PASS.semantic3done)
+            if (sd.xeq && sd.xeq.isGenerated && sd.xeq._scope && sd.xeq.semanticRun < PASS.semantic3done)
             {
                 uint errors = global.startGagging();
                 sd.xeq.semantic3(sd.xeq._scope);
@@ -1379,7 +2280,7 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
             }
             else if (sd.xeq == sd.xerreq)
             {
-                if (search_function(sd, Id.eq))
+                if (search_function(sd, Id.opEquals))
                 {
                     .error(loc, "%sAA key type `%s` does not have `bool opEquals(ref const %s) const`", s, sd.toChars(), sd.toChars());
                 }
@@ -1391,7 +2292,7 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
             }
             else if (!sd.xhash)
             {
-                if (search_function(sd, Id.eq))
+                if (search_function(sd, Id.opEquals))
                 {
                     .error(loc, "%sAA key type `%s` should have `extern (D) size_t toHash() const nothrow @safe` if `opEquals` defined", s, sd.toChars());
                 }
@@ -1421,17 +2322,17 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
 
             if (!ClassDeclaration.object)
             {
-                .error(Loc.initial, "missing or corrupt object.d");
-                fatal();
+                ObjectNotFound(Loc.initial, cd.ident);
+                return error();
             }
 
             __gshared FuncDeclaration feq = null;
             __gshared FuncDeclaration fcmp = null;
             __gshared FuncDeclaration fhash = null;
             if (!feq)
-                feq = search_function(ClassDeclaration.object, Id.eq).isFuncDeclaration();
+                feq = search_function(ClassDeclaration.object, Id.opEquals).isFuncDeclaration();
             if (!fcmp)
-                fcmp = search_function(ClassDeclaration.object, Id.cmp).isFuncDeclaration();
+                fcmp = search_function(ClassDeclaration.object, Id.opCmp).isFuncDeclaration();
             if (!fhash)
                 fhash = search_function(ClassDeclaration.object, Id.tohash).isFuncDeclaration();
             assert(fcmp && feq && fhash);
@@ -1465,7 +2366,7 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
         default:
             break;
         }
-        if (mtype.next.isscope())
+        if (mtype.next.isScopeClass())
         {
             .error(loc, "cannot have array of scope `%s`", mtype.next.toChars());
             return error();
@@ -1565,23 +2466,23 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
         if (sc.stc & STC.pure_)
             tf.purity = PURE.fwdref;
         if (sc.stc & STC.nothrow_)
-            tf.isnothrow = true;
+            tf.isNothrow = true;
         if (sc.stc & STC.nogc)
-            tf.isnogc = true;
+            tf.isNogc = true;
         if (sc.stc & STC.ref_)
-            tf.isref = true;
+            tf.isRef = true;
         if (sc.stc & STC.return_)
-            tf.isreturn = true;
+            tf.isReturn = true;
         if (sc.stc & STC.returnScope)
-            tf.isreturnscope = true;
+            tf.isReturnScope = true;
         if (sc.stc & STC.returninferred)
-            tf.isreturninferred = true;
+            tf.isReturnInferred = true;
         if (sc.stc & STC.scope_)
             tf.isScopeQual = true;
         if (sc.stc & STC.scopeinferred)
-            tf.isscopeinferred = true;
+            tf.isScopeInferred = true;
 
-//        if (tf.isreturn && !tf.isref)
+//        if (tf.isReturn && !tf.isRef)
 //            tf.isScopeQual = true;                                  // return by itself means 'return scope'
 
         if (tf.trust == TRUST.default_)
@@ -1595,9 +2496,9 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
         }
 
         if (sc.stc & STC.property)
-            tf.isproperty = true;
+            tf.isProperty = true;
         if (sc.stc & STC.live)
-            tf.islive = true;
+            tf.isLive = true;
 
         tf.linkage = sc.linkage;
         if (tf.linkage == LINK.system)
@@ -1631,7 +2532,7 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
             tf.next = tf.next.typeSemantic(loc, sc);
             sc = sc.pop();
             errors |= tf.checkRetType(loc);
-            if (tf.next.isscope() && !tf.isctor)
+            if (tf.next.isScopeClass() && !tf.isCtor)
             {
                 .error(loc, "functions cannot return `scope %s`", tf.next.toChars());
                 errors = true;
@@ -1639,9 +2540,9 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
             if (tf.next.hasWild())
                 wildreturn = true;
 
-            if (tf.isreturn && !tf.isref && !tf.next.hasPointers())
+            if (tf.isReturn && !tf.isRef && !tf.next.hasPointers())
             {
-                tf.isreturn = false;
+                tf.isReturn = false;
             }
         }
 
@@ -1661,9 +2562,12 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
             else
             {
                 e = inferType(e, fparam.type);
+                Scope* sc2 = sc.push();
+                sc2.inDefaultArg = true;
                 Initializer iz = new ExpInitializer(e.loc, e);
-                iz = iz.initializerSemantic(sc, fparam.type, INITnointerpret);
+                iz = iz.initializerSemantic(sc2, fparam.type, INITnointerpret);
                 e = iz.initializerToExpression();
+                sc2.pop();
             }
             if (e.op == EXP.function_) // https://issues.dlang.org/show_bug.cgi?id=4820
             {
@@ -1680,14 +2584,13 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
             {
                 const(char)* errTxt = fparam.storageClass & STC.ref_ ? "ref" : "out";
                 .error(e.loc, "expression `%s` of type `%s` is not implicitly convertible to type `%s %s` of parameter `%s`",
-                      e.toChars(), e.type.toChars(), errTxt, fparam.type.toChars(), fparam.toChars());
+                      e.toErrMsg(), e.type.toChars(), errTxt, fparam.type.toChars(), fparam.toChars());
             }
             e = e.implicitCastTo(sc, fparam.type);
 
             // default arg must be an lvalue
             if (isRefOrOut && !isAuto &&
-                !(fparam.storageClass & STC.constscoperef) &&
-                global.params.rvalueRefParam != FeatureState.enabled)
+                !(fparam.storageClass & STC.constscoperef) && !sc.previews.rvalueRefParam)
                 e = e.toLvalue(sc, "create default argument for `ref` / `out` parameter from");
 
             fparam.defaultArg = e;
@@ -1700,7 +2603,7 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
             /* Create a scope for evaluating the default arguments for the parameters
              */
             Scope* argsc = sc.push();
-            argsc.stc = 0; // don't inherit storage class
+            argsc.stc = STC.none; // don't inherit storage class
             argsc.visibility = Visibility(Visibility.Kind.public_);
             argsc.func = null;
 
@@ -1756,12 +2659,12 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
                             // https://issues.dlang.org/show_bug.cgi?id=12744
                             // If the storage classes of narg
                             // conflict with the ones in fparam, it's ignored.
-                            StorageClass stc  = fparam.storageClass | narg.storageClass;
-                            StorageClass stc1 = fparam.storageClass & (STC.ref_ | STC.out_ | STC.lazy_);
-                            StorageClass stc2 =   narg.storageClass & (STC.ref_ | STC.out_ | STC.lazy_);
+                            STC stc  = fparam.storageClass | narg.storageClass;
+                            STC stc1 = fparam.storageClass & (STC.ref_ | STC.out_ | STC.lazy_);
+                            STC stc2 =   narg.storageClass & (STC.ref_ | STC.out_ | STC.lazy_);
                             if (stc1 && stc2 && stc1 != stc2)
                             {
-                                OutBuffer buf1;  stcToBuffer(buf1, stc1 | ((stc1 & STC.ref_) ? (fparam.storageClass & STC.auto_) : 0));
+                                OutBuffer buf1;  stcToBuffer(buf1, stc1 | ((stc1 & STC.ref_) ? (fparam.storageClass & STC.auto_) : STC.none));
                                 OutBuffer buf2;  stcToBuffer(buf2, stc2);
 
                                 .error(loc, "incompatible parameter storage classes `%s` and `%s`",
@@ -1845,10 +2748,17 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
                     errors = true;
                 }
 
-                const bool isTypesafeVariadic = i + 1 == dim &&
-                                                tf.parameterList.varargs == VarArg.typesafe &&
-                                                (t.isTypeDArray() || t.isTypeClass());
-                if (isTypesafeVariadic)
+                const bool isTypesafeVariadic = i + 1 == dim && tf.parameterList.varargs == VarArg.typesafe;
+                const bool isStackAllocatedVariadic = isTypesafeVariadic && (t.isTypeDArray() || t.isTypeClass());
+
+                if (isTypesafeVariadic && t.isTypeClass())
+                {
+                    // Deprecated in 2.111, kept as a legacy feature for compatibility (currently no plan to turn it into an error)
+                    .deprecation(loc, "typesafe variadic parameters with a `class` type (`%s %s...`) are deprecated",
+                        t.isTypeClass().sym.ident.toChars(), fparam.toChars());
+                }
+
+                if (isStackAllocatedVariadic)
                 {
                     /* typesafe variadic arguments are constructed on the stack, so must be `scope`
                      */
@@ -1861,7 +2771,7 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
                     {
                         if (!(fparam.storageClass & STC.scope_))
                             fparam.storageClass |= STC.scope_ | STC.scopeinferred; // 'return' implies 'scope'
-                        if (tf.isref)
+                        if (tf.isRef)
                         {
                         }
                         else if (tf.next && !tf.next.hasPointers() && tf.next.toBasetype().ty != Tvoid)
@@ -1870,7 +2780,7 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
                         }
                     }
 
-                    if (isTypesafeVariadic)
+                    if (isStackAllocatedVariadic)
                     {
                         /* This is because they can be constructed on the stack
                          * https://dlang.org/spec/function.html#typesafe_variadic_functions
@@ -1918,6 +2828,12 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
                         fparam.storageClass |= STC.ref_;
                 }
             }
+
+            Expressions* fargs = mtype.inferenceArguments.arguments;
+
+            // mtype.argumentList only provided for Implicit Function Template Instantiation
+            if (mtype.inferenceArguments.length > 0)
+                fargs = tf.resolveNamedArgs(mtype.inferenceArguments, null);
 
             // Now that we completed semantic for the argument types,
             // run semantic on their default values,
@@ -1968,11 +2884,13 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
                  */
                 if (eparam.storageClass & STC.auto_)
                 {
-                    Expression farg = mtype.fargs && eidx < mtype.fargs.length ?
-                        (*mtype.fargs)[eidx] : eparam.defaultArg;
+                    Expression farg = (fargs && eidx < fargs.length) ? (*fargs)[eidx] : null;
+                    if (!farg)
+                        farg = eparam.defaultArg;
+
                     if (farg && (eparam.storageClass & STC.ref_))
                     {
-                        if (!farg.isLvalue())
+                        if (!farg.isLvalue() || farg.isBitField())
                             eparam.storageClass &= ~STC.ref_; // value parameter
                         eparam.storageClass &= ~STC.auto_;    // https://issues.dlang.org/show_bug.cgi?id=14656
                         eparam.storageClass |= STC.autoref;
@@ -2011,14 +2929,14 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
         tf.isInOutParam = (wildparams & 1) != 0;
         tf.isInOutQual  = (wildparams & 2) != 0;
 
-        if (tf.isproperty && (tf.parameterList.varargs != VarArg.none || tf.parameterList.length > 2))
+        if (tf.isProperty && (tf.parameterList.varargs != VarArg.none || tf.parameterList.length > 2))
         {
             .error(loc, "properties can only have zero, one, or two parameter");
             errors = true;
         }
 
         if (tf.parameterList.varargs == VarArg.variadic && tf.linkage != LINK.d && tf.parameterList.length == 0 &&
-            !(sc.flags & SCOPE.Cfile))
+            !sc.inCfile)
         {
             .error(loc, "variadic functions with non-D linkage must have at least one parameter");
             errors = true;
@@ -2074,59 +2992,59 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
         Expression e;
         Dsymbol s;
         //printf("TypeIdentifier::semantic(%s)\n", mtype.toChars());
-        mtype.resolve(loc, sc, e, t, s);
+        if (mtype.loc != Loc.initial)
+            mtype.resolve(mtype.loc, sc, e, t, s);
+        else
+            mtype.resolve(loc, sc, e, t, s);
+
         if (t)
         {
             //printf("\tit's a type %d, %s, %s\n", t.ty, t.toChars(), t.deco);
             return t.addMod(mtype.mod);
         }
-        else
+
+        if (s)
         {
-            if (s)
-            {
-                auto td = s.isTemplateDeclaration;
-                if (td && td.onemember && td.onemember.isAggregateDeclaration)
-                    .error(loc, "template %s `%s` is used as a type without instantiation"
-                        ~ "; to instantiate it use `%s!(arguments)`",
-                        s.kind, s.toPrettyChars, s.ident.toChars);
-                else
-                    .error(loc, "%s `%s` is used as a type", s.kind, s.toPrettyChars);
-                //assert(0);
-            }
-            else if (e.op == EXP.variable) // special case: variable is used as a type
-            {
-                /*
-                    N.B. This branch currently triggers for the following code
-                    template test(x* x)
-                    {
-
-                    }
-                    i.e. the compiler prints "variable x is used as a type"
-                    which isn't a particularly good error message (x is a variable?).
-                */
-                Dsymbol varDecl = mtype.toDsymbol(sc);
-                const(Loc) varDeclLoc = varDecl.getLoc();
-                Module varDeclModule = varDecl.getModule(); //This can be null
-
-                .error(loc, "variable `%s` is used as a type", mtype.toChars());
-                //Check for null to avoid https://issues.dlang.org/show_bug.cgi?id=22574
-                if ((varDeclModule !is null) && varDeclModule != sc._module) // variable is imported
-                {
-                    const(Loc) varDeclModuleImportLoc = varDeclModule.getLoc();
-                    .errorSupplemental(
-                        varDeclModuleImportLoc,
-                        "variable `%s` is imported here from: `%s`",
-                        varDecl.toChars,
-                        varDeclModule.toPrettyChars,
-                    );
-                }
-
-                .errorSupplemental(varDeclLoc, "variable `%s` is declared here", varDecl.toChars);
-            }
+            auto td = s.isTemplateDeclaration;
+            if (td && td.onemember && td.onemember.isAggregateDeclaration)
+                .error(loc, "template %s `%s` is used as a type without instantiation"
+                    ~ "; to instantiate it use `%s!(arguments)`",
+                    s.kind, s.toPrettyChars, s.ident.toChars);
             else
-                .error(loc, "`%s` is used as a type", mtype.toChars());
-            return error();
+                .error(loc, "%s `%s` is used as a type", s.kind, s.toPrettyChars);
+            //assert(0);
         }
+        else if (e.op == EXP.variable) // special case: variable is used as a type
+        {
+            /*
+                N.B. This branch currently triggers for the following code
+                template test(x* x)
+                {
+
+                }
+                i.e. the compiler prints "variable x is used as a type"
+                which isn't a particularly good error message (x is a variable?).
+            */
+            Dsymbol varDecl = mtype.toDsymbol(sc);
+            Module varDeclModule = varDecl.getModule(); //This can be null
+
+            .error(loc, "variable `%s` is used as a type", mtype.toChars());
+            //Check for null to avoid https://issues.dlang.org/show_bug.cgi?id=22574
+            if ((varDeclModule !is null) && varDeclModule != sc._module) // variable is imported
+            {
+                .errorSupplemental(
+                    varDeclModule.loc,
+                    "variable `%s` is imported here from: `%s`",
+                    varDecl.toChars,
+                    varDeclModule.toPrettyChars,
+                );
+            }
+
+            .errorSupplemental(varDecl.loc, "variable `%s` is declared here", varDecl.toChars);
+        }
+        else
+            .error(loc, "`%s` is used as a type", mtype.toChars());
+        return error();
     }
 
     Type visitInstance(TypeInstance mtype)
@@ -2166,7 +3084,7 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
         Type t;
         Dsymbol s;
         mtype.resolve(loc, sc, e, t, s);
-        if (s && (t = s.getType()) !is null)
+        if (s && (t = dmd.dsymbolsem.getType(s)) !is null)
             t = t.addMod(mtype.mod);
         if (!t)
         {
@@ -2199,7 +3117,7 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
         Type t;
         Dsymbol s;
         mtype.resolve(loc, sc, e, t, s);
-        if (s && (t = s.getType()) !is null)
+        if (s && (t = dmd.dsymbolsem.getType(s)) !is null)
             t = t.addMod(mtype.mod);
         if (!t)
         {
@@ -2326,8 +3244,14 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
     Type visitTag(TypeTag mtype)
     {
         //printf("TypeTag.semantic() %s\n", mtype.toChars());
-        Type returnType(Type t)
+        Type returnType(TypeTag tt)
         {
+            Type t = tt.resolved;
+            // To make const checking work, the const STC needs to be added:
+            // t = t.resolved.addSTC(mtype.mod.ModToStc);
+            // However, this currently fails compilable/test22875.i
+            // Apparently there's some aliasing going on, where mutable
+            // versions of the type also get const applied to them.
             return t.deco ? t : t.merge();
         }
 
@@ -2335,7 +3259,7 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
         {
             /* struct S s, *p;
              */
-            return returnType(mtype.resolved.addSTC(mtype.mod));
+            return returnType(mtype);
         }
 
         /* Find the current scope by skipping tag scopes.
@@ -2408,7 +3332,7 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
         {
             mtype.id = Identifier.generateId("__tag"[]);
             declareTag();
-            return returnType(mtype.resolved.addSTC(mtype.mod));
+            return returnType(mtype);
         }
 
         /* look for pre-existing declaration
@@ -2421,7 +3345,7 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
             if (mtype.tok == TOK.enum_ && !mtype.members)
                 .error(mtype.loc, "`enum %s` is incomplete without members", mtype.id.toChars()); // C11 6.7.2.3-3
             declareTag();
-            return returnType(mtype.resolved.addSTC(mtype.mod));
+            return returnType(mtype);
         }
 
         /* A redeclaration only happens if both declarations are in
@@ -2476,7 +3400,7 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
                 else
                 {
                     /* struct S { int a; };
-                     * struct S *s;
+                     * struct S* s;
                      */
                 }
                 mtype.resolved = sd.type;
@@ -2507,21 +3431,21 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
                      mtype.tok == TOK.struct_ && s.isStructDeclaration())
             {
                 /* struct S;
-                 * { struct S *s; }
+                 * { struct S* s; }
                  */
                 mtype.resolved = s.isStructDeclaration().type;
             }
             else
             {
                 /* union S;
-                 * { struct S *s; }
+                 * { struct S* s; }
                  */
                 .error(mtype.loc, "redeclaring `%s %s` as `%s %s`",
                     s.kind(), s.toChars(), Token.toChars(mtype.tok), mtype.id.toChars());
                 declareTag();
             }
         }
-        return returnType(mtype.resolved.addSTC(mtype.mod));
+        return returnType(mtype);
     }
 
     switch (type.ty)
@@ -2553,6 +3477,31 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
     }
 }
 
+Type trySemantic(Type type, Loc loc, Scope* sc)
+{
+    //printf("+trySemantic(%s) %d\n", toChars(), global.errors);
+
+    // Needed to display any deprecations that were gagged
+    auto tcopy = type.syntaxCopy();
+
+    const errors = global.startGagging();
+    Type t = typeSemantic(type, loc, sc);
+    if (global.endGagging(errors) || t.ty == Terror) // if any errors happened
+    {
+        t = null;
+    }
+    else
+    {
+        // If `typeSemantic` succeeded, there may have been deprecations that
+        // were gagged due the `startGagging` above.  Run again to display
+        // those deprecations.  https://issues.dlang.org/show_bug.cgi?id=19107
+        if (global.gaggedDeprecations > 0)
+            typeSemantic(tcopy, loc, sc);
+    }
+    //printf("-trySemantic(%s) %d\n", toChars(), global.errors);
+    return t;
+}
+
 /************************************
  * If an identical type to `type` is in `type.stringtable`, return
  * the latter one. Otherwise, add it to `type.stringtable`.
@@ -2562,7 +3511,7 @@ extern(C++) Type typeSemantic(Type type, const ref Loc loc, Scope* sc)
  * Returns:
  *      the type that was merged
  */
-extern (C++) Type merge(Type type)
+Type merge(Type type)
 {
     switch (type.ty)
     {
@@ -2576,15 +3525,30 @@ extern (C++) Type merge(Type type)
 
         case Tsarray:
             // prevents generating the mangle if the array dim is not yet known
-            if (!type.isTypeSArray().dim.isIntegerExp())
-                return type;
-            goto default;
+            if (auto ie = type.isTypeSArray().dim.isIntegerExp())
+            {
+                // After TypeSemantic, the length is always converted to size_t, but the parser
+                // usually generates regular integer types (e.g. in cast(const ubyte[2])) which
+                // it may try to merge, which then leads to failing implicit conversions as 2LU != 2
+                // according to Expression.equals. Only merge array types with size_t lengths for now.
+                // https://github.com/dlang/dmd/issues/21179
+                if (ie.type != Type.tsize_t)
+                    return type;
+
+                goto default;
+            }
+            return type;
 
         case Tenum:
             break;
 
         case Taarray:
             if (!type.isTypeAArray().index.merge().deco)
+                return type;
+            goto default;
+
+        case Tfunction:
+            if (!type.nextOf()) // don't merge if return type is unknown
                 return type;
             goto default;
 
@@ -2595,39 +3559,153 @@ extern (C++) Type merge(Type type)
     }
 
     //printf("merge(%s)\n", toChars());
-    if (!type.deco)
+    if (type.deco)
+        return type;
+
+    OutBuffer buf;
+    buf.reserve(32);
+
+    mangleToBuffer(type, buf);
+
+    auto sv = type.stringtable.update(buf[]);
+    if (sv.value)
     {
-        OutBuffer buf;
-        buf.reserve(32);
-
-        mangleToBuffer(type, buf);
-
-        auto sv = type.stringtable.update(buf[]);
-        if (sv.value)
+        Type t = sv.value;
+        debug
         {
-            Type t = sv.value;
-            debug
-            {
-                import core.stdc.stdio;
-                if (!t.deco)
-                    printf("t = %s\n", t.toChars());
-            }
-            assert(t.deco);
-            //printf("old value, deco = '%s' %p\n", t.deco, t.deco);
-            return t;
+            import core.stdc.stdio;
+            if (!t.deco)
+                printf("t = %s\n", t.toChars());
         }
-        else
-        {
-            Type t = stripDefaultArgs(type);
-            sv.value = t;
-            type.deco = t.deco = cast(char*)sv.toDchars();
-            //printf("new value, deco = '%s' %p\n", t.deco, t.deco);
-            return t;
-        }
+        assert(t.deco);
+        //printf("old value, deco = '%s' %p\n", t.deco, t.deco);
+        return t;
     }
-    return type;
+    else
+    {
+        Type t = stripDefaultArgs(type);
+        sv.value = t;
+        type.deco = t.deco = cast(char*)sv.toDchars();
+        //printf("new value, deco = '%s' %p\n", t.deco, t.deco);
+        return t;
+    }
 }
 
+/*************************************
+ * This version does a merge even if the deco is already computed.
+ * Necessary for types that have a deco, but are not merged.
+ */
+Type merge2(Type type)
+{
+    //printf("merge2(%s)\n", toChars());
+    Type t = type;
+    assert(t);
+    if (!t.deco)
+        return t.merge();
+
+    auto sv = Type.stringtable.lookup(t.deco, strlen(t.deco));
+    if (sv && sv.value)
+    {
+        t = sv.value;
+        assert(t.deco);
+    }
+    else
+        assert(0);
+    return t;
+}
+
+private enum LOGDEFAULTINIT = 0;
+/***************************************
+ * Use when we prefer the default initializer to be a literal,
+ * rather than a global immutable variable.
+ */
+Expression defaultInitLiteral(Type t, Loc loc)
+{
+
+    if (t.isTypeError())
+        return ErrorExp.get();
+    if (auto ts = t.isTypeStruct())
+    {
+        static if (LOGDEFAULTINIT)
+        {
+            printf("TypeStruct::defaultInitLiteral() '%s'\n", toChars());
+        }
+        {
+            import dmd.dsymbolsem: size;
+            ts.sym.size(loc);
+        }
+        if (ts.sym.sizeok != Sizeok.done)
+            return ErrorExp.get();
+
+        auto structelems = new Expressions(ts.sym.nonHiddenFields());
+        uint offset = 0;
+        foreach (j; 0 .. structelems.length)
+        {
+            VarDeclaration vd = ts.sym.fields[j];
+            Expression e;
+            if (vd.inuse)
+            {
+                error(loc, "circular reference to `%s`", vd.toPrettyChars());
+                return ErrorExp.get();
+            }
+            if (vd.offset < offset || vd.type.size() == 0)
+                e = null;
+            else if (vd._init)
+            {
+                if (vd._init.isVoidInitializer())
+                    e = null;
+                else
+                    e = vd.getConstInitializer(false);
+            }
+            else
+                e = vd.type.defaultInitLiteral(loc);
+            if (e && e.op == EXP.error)
+                return e;
+            if (e)
+                offset = vd.offset + cast(uint)vd.type.size();
+            (*structelems)[j] = e;
+        }
+        auto structinit = new StructLiteralExp(loc, ts.sym, structelems);
+
+        /* Copy from the initializer symbol for larger symbols,
+         * otherwise the literals expressed as code get excessively large.
+         */
+        if (size(ts, loc) > target.ptrsize * 4 && !ts.needsNested())
+            structinit.useStaticInit = true;
+
+        structinit.type = ts;
+        return structinit;
+    }
+    if (auto tv = t.isTypeVector())
+    {
+        //printf("TypeVector::defaultInitLiteral()\n");
+        assert(tv.basetype.ty == Tsarray);
+        Expression e = tv.basetype.defaultInitLiteral(loc);
+        auto ve = new VectorExp(loc, e, tv);
+        ve.type = tv;
+        ve.dim = cast(int)(tv.basetype.size(loc) / tv.elementType().size(loc));
+        return ve;
+    }
+    if (auto tsa = t.isTypeSArray())
+    {
+        static if (LOGDEFAULTINIT)
+        {
+            printf("TypeSArray::defaultInitLiteral() '%s'\n", toChars());
+        }
+        size_t d = cast(size_t)tsa.dim.toInteger();
+        Expression elementinit;
+        if (tsa.next.ty == Tvoid)
+            elementinit = Type.tuns8.defaultInitLiteral(loc);
+        else
+            elementinit = tsa.next.defaultInitLiteral(loc);
+        auto elements = new Expressions(d);
+        foreach (ref e; *elements)
+            e = null;
+        auto ae = new ArrayLiteralExp(loc, tsa, elementinit, elements);
+        return ae;
+    }
+    return defaultInit(t, loc);
+}
 /***************************************
  * Calculate built-in properties which just the type is necessary.
  *
@@ -2641,7 +3719,7 @@ extern (C++) Type merge(Type type)
  * Returns:
  *      expression representing the property, or null if not a property and (flag & 1)
  */
-Expression getProperty(Type t, Scope* scope_, const ref Loc loc, Identifier ident, int flag,
+Expression getProperty(Type t, Scope* scope_, Loc loc, Identifier ident, int flag,
     Expression src = null)
 {
     Expression visitType(Type mt)
@@ -2656,14 +3734,14 @@ Expression getProperty(Type t, Scope* scope_, const ref Loc loc, Identifier iden
             const sz = mt.size(loc);
             if (sz == SIZE_INVALID)
                 return ErrorExp.get();
-            e = new IntegerExp(loc, sz, Type.tsize_t);
+            return new IntegerExp(loc, sz, Type.tsize_t);
         }
         else if (ident == Id.__xalignof)
         {
             const explicitAlignment = mt.alignment();
             const naturalAlignment = mt.alignsize();
             const actualAlignment = (explicitAlignment.isDefault() ? naturalAlignment : explicitAlignment.get());
-            e = new IntegerExp(loc, actualAlignment, Type.tsize_t);
+            return new IntegerExp(loc, actualAlignment, Type.tsize_t);
         }
         else if (ident == Id._init)
         {
@@ -2673,13 +3751,14 @@ Expression getProperty(Type t, Scope* scope_, const ref Loc loc, Identifier iden
             {
                 e.isStructLiteralExp().useStaticInit = true;
             }
+            return e;
         }
         else if (ident == Id._mangleof)
         {
             if (!mt.deco)
             {
                 error(loc, "forward reference of type `%s.mangleof`", mt.toChars());
-                e = ErrorExp.get();
+                return ErrorExp.get();
             }
             else
             {
@@ -2688,6 +3767,7 @@ Expression getProperty(Type t, Scope* scope_, const ref Loc loc, Identifier iden
                 sc.eSink = global.errorSink;
                 e = e.expressionSemantic(&sc);
             }
+            return e;
         }
         else if (ident == Id.stringof)
         {
@@ -2696,53 +3776,89 @@ Expression getProperty(Type t, Scope* scope_, const ref Loc loc, Identifier iden
             Scope sc;
             sc.eSink = global.errorSink;
             e = e.expressionSemantic(&sc);
+            return e;
         }
         else if (flag && mt != Type.terror)
         {
             return null;
         }
+
+        Dsymbol s = null;
+        auto derefType = mt.isTypePointer() ? mt.nextOf() : mt;
+
+        if (derefType.isTypeStruct() || derefType.isTypeClass() || derefType.isTypeEnum())
+            s = derefType.toDsymbol(null);
+        if (s)
+            s = s.search_correct(ident);
+        if (s && !symbolIsVisible(scope_, s))
+            s = null;
+
+        if (mt == Type.terror)
+            return ErrorExp.get();
+
+        if (s)
+        {
+            error(loc, "no property `%s` for type `%s`", ident.toErrMsg(), mt.toErrMsg());
+            errorSupplemental(s.loc, "did you mean `%s`?", ident == s.ident ? s.toPrettyChars() : s.toErrMsg());
+        }
+        else if (ident == Id.opCall && mt.ty == Tclass)
+            error(loc, "no property `%s` for type `%s`, did you mean `new %s`?", ident.toErrMsg(), mt.toErrMsg(), mt.toPrettyChars());
+
+        else if (const n = importHint(ident.toString()))
+                error(loc, "no property `%s` for type `%s`, perhaps `import %.*s;` is needed?", ident.toErrMsg(), mt.toErrMsg(), cast(int)n.length, n.ptr);
         else
         {
-            Dsymbol s = null;
-            if (mt.ty == Tstruct || mt.ty == Tclass || mt.ty == Tenum)
-                s = mt.toDsymbol(null);
-            if (s)
-                s = s.search_correct(ident);
-            if (s && !symbolIsVisible(scope_, s))
-                s = null;
-            if (mt != Type.terror)
+            if (src)
             {
-                if (s)
-                    error(loc, "no property `%s` for type `%s`, did you mean `%s`?", ident.toChars(), mt.toChars(), s.toPrettyChars());
-                else if (ident == Id.call && mt.ty == Tclass)
-                    error(loc, "no property `%s` for type `%s`, did you mean `new %s`?", ident.toChars(), mt.toChars(), mt.toPrettyChars());
-
-                else if (const n = importHint(ident.toString()))
-                        error(loc, "no property `%s` for type `%s`, perhaps `import %.*s;` is needed?", ident.toChars(), mt.toChars(), cast(int)n.length, n.ptr);
-                else
+                error(loc, "no property `%s` for `%s` of type `%s`",
+                    ident.toErrMsg(), src.toErrMsg(), mt.toPrettyChars(true));
+                auto s2 = scope_.search_correct(ident);
+                // UFCS
+                if (s2 && s2.isFuncDeclaration)
                 {
-                    if (src)
-                        error(loc, "no property `%s` for `%s` of type `%s`", ident.toChars(), src.toChars(), mt.toPrettyChars(true));
-                    else
-                        error(loc, "no property `%s` for type `%s`", ident.toChars(), mt.toPrettyChars(true));
-
-                    if (auto dsym = mt.toDsymbol(scope_))
+                    if (s2.ident == ident)
                     {
-                        if (auto sym = dsym.isAggregateDeclaration())
-                        {
-                            if (auto fd = search_function(sym, Id.opDispatch))
-                                errorSupplemental(loc, "potentially malformed `opDispatch`. Use an explicit instantiation to get a better error message");
-                            else if (!sym.members)
-                                errorSupplemental(sym.loc, "`%s %s` is opaque and has no members.", sym.kind, mt.toPrettyChars(true));
-                        }
-                        errorSupplemental(dsym.loc, "%s `%s` defined here",
-                            dsym.kind, dsym.toChars());
+                        errorSupplemental(s2.loc, "cannot call %s `%s` with UFCS because it is not declared at module scope",
+                            s2.kind(), s2.toErrMsg());
                     }
+                    else
+                        errorSupplemental(s2.loc, "did you mean %s `%s`?",
+                            s2.kind(), s2.toErrMsg());
                 }
             }
-            e = ErrorExp.get();
+            else
+                error(loc, "no property `%s` for type `%s`", ident.toErrMsg(), mt.toPrettyChars(true));
+
+            if (auto dsym = derefType.toDsymbol(scope_))
+            {
+                if (auto sym = dsym.isAggregateDeclaration())
+                {
+                    if (!sym.members)
+                    {
+                        errorSupplemental(sym.loc, "`%s %s` is opaque and has no members.", sym.kind, mt.toPrettyChars(true));
+                        return ErrorExp.get();
+                    }
+
+                    if (auto fd = search_function(sym, Id.opDispatch))
+                    {
+                        if (auto td = fd.isTemplateDeclaration())
+                        {
+                            e = mt.defaultInitLiteral(loc);
+                            auto se = new StringExp(e.loc, ident.toString());
+                            auto tiargs = new Objects(se);
+                            auto dti = new DotTemplateInstanceExp(e.loc, e, Id.opDispatch, tiargs);
+                            dti.ti.tempdecl = td;
+                            dti.dotTemplateSemanticProp(scope_, DotExpFlag.none);
+                            return ErrorExp.get();
+                        }
+                    }
+                }
+                errorSupplemental(dsym.loc, "%s `%s` defined here",
+                    dsym.kind, dsym.toErrMsg());
+            }
         }
-        return e;
+
+        return ErrorExp.get();
     }
 
     Expression visitError(TypeError)
@@ -2764,7 +3880,7 @@ Expression getProperty(Type t, Scope* scope_, const ref Loc loc, Identifier iden
 
         Expression floatValue(real_t r)
         {
-            if (mt.isreal() || mt.isimaginary())
+            if (mt.isReal() || mt.isImaginary())
                 return new RealExp(loc, r, mt);
             else
             {
@@ -3103,7 +4219,7 @@ private void resolveExp(Expression exp, out Type t, out Expression e, out Dsymbo
  *  ps = is set if t is a symbol
  *  intypeid = true if in type id
  */
-void resolve(Type mt, const ref Loc loc, Scope* sc, out Expression pe, out Type pt, out Dsymbol ps, bool intypeid = false)
+void resolve(Type mt, Loc loc, Scope* sc, out Expression pe, out Type pt, out Dsymbol ps, bool intypeid = false)
 {
     void returnExp(Expression e)
     {
@@ -3410,7 +4526,7 @@ void resolve(Type mt, const ref Loc loc, Scope* sc, out Expression pe, out Type 
             // compile time sequences are valid types
             !mt.exp.type.isTypeTuple())
         {
-            if (!(sc.flags & SCOPE.Cfile) && // in (extended) C typeof may be used on types as with sizeof
+            if (!sc.inCfile && // in (extended) C typeof may be used on types as with sizeof
                 mt.exp.checkType())
                 goto Lerr;
 
@@ -3427,12 +4543,12 @@ void resolve(Type mt, const ref Loc loc, Scope* sc, out Expression pe, out Type 
             // f might be a unittest declaration which is incomplete when compiled
             // without -unittest. That causes a segfault in checkForwardRef, see
             // https://issues.dlang.org/show_bug.cgi?id=20626
-            if ((!f.isUnitTestDeclaration() || global.params.useUnitTests) && f.checkForwardRef(loc))
+            if ((!f.isUnitTestDeclaration() || global.params.useUnitTests) && checkForwardRef(f, loc))
                 goto Lerr;
         }
         if (auto f = isFuncAddress(mt.exp))
         {
-            if (f.checkForwardRef(loc))
+            if (checkForwardRef(f, loc))
                 goto Lerr;
         }
 
@@ -3739,6 +4855,10 @@ void resolve(Type mt, const ref Loc loc, Scope* sc, out Expression pe, out Type 
  */
 Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag flag)
 {
+    enum LOGDOTEXP = false;
+    if (LOGDOTEXP)
+        printf("dotExp()\n");
+
     Expression visitType(Type mt)
     {
         VarDeclaration v = null;
@@ -3759,17 +4879,35 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
         }
         if (v)
         {
-            if (ident == Id.offsetof)
+            if (ident == Id.offsetof ||
+                ident == Id.bitoffsetof ||
+                ident == Id.bitwidth)
             {
                 v.dsymbolSemantic(null);
                 if (v.isField())
                 {
                     auto ad = v.isMember();
                     objc.checkOffsetof(e, ad);
-                    ad.size(e.loc);
+                    {
+                        import dmd.dsymbolsem: size;
+                        ad.size(e.loc);
+                    }
                     if (ad.sizeok != Sizeok.done)
                         return ErrorExp.get();
-                    return new IntegerExp(e.loc, v.offset, Type.tsize_t);
+                    uint value;
+                    if (ident == Id.offsetof)
+                        value = v.offset;
+                    else // Id.bitoffsetof || Id.bitwidth
+                    {
+                        auto bf = v.isBitFieldDeclaration();
+                        if (bf)
+                        {
+                            value = ident == Id.bitoffsetof ? bf.bitOffset : bf.fieldWidth;
+                        }
+                        else
+                            error(v.loc, "`%s` is not a bitfield, cannot apply `%s`", v.toChars(), ident.toChars());
+                    }
+                    return new IntegerExp(e.loc, value, Type.tsize_t);
                 }
             }
             else if (ident == Id._init)
@@ -3990,7 +5128,7 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
         {
             if (e.op == EXP.type)
             {
-                error(e.loc, "`%s` is not an expression", e.toChars());
+                error(e.loc, "`%s` is not an expression", e.toErrMsg());
                 return ErrorExp.get();
             }
             else if (mt.dim.toUInteger() < 1 && checkUnsafeDotExp(sc, e, ident, flag))
@@ -4039,7 +5177,7 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
         }
         if (e.op == EXP.type && (ident == Id.length || ident == Id.ptr))
         {
-            error(e.loc, "`%s` is not an expression", e.toChars());
+            error(e.loc, "`%s` is not an expression", e.toErrMsg());
             return ErrorExp.get();
         }
         if (ident == Id.length)
@@ -4081,20 +5219,15 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
         }
         if (ident == Id.length)
         {
-            __gshared FuncDeclaration fd_aaLen = null;
-            if (fd_aaLen is null)
-            {
-                auto fparams = new Parameters();
-                fparams.push(new Parameter(Loc.initial, STC.const_ | STC.scope_, mt, null, null, null));
-                fd_aaLen = FuncDeclaration.genCfunc(fparams, Type.tsize_t, Id.aaLen);
-                TypeFunction tf = fd_aaLen.type.toTypeFunction();
-                tf.purity = PURE.const_;
-                tf.isnothrow = true;
-                tf.isnogc = false;
-            }
-            Expression ev = new VarExp(e.loc, fd_aaLen, false);
-            e = new CallExp(e.loc, ev, e);
-            e.type = fd_aaLen.type.toTypeFunction().next;
+            auto loc = e.loc;
+            Expression hookFunc = new IdentifierExp(loc, Id.empty);
+            hookFunc = new DotIdExp(loc, hookFunc, Id.object);
+            auto keytype = mt.index.substWildTo(MODFlags.const_);
+            auto valtype = mt.nextOf().substWildTo(MODFlags.const_);
+            auto tiargs = new Objects(keytype, valtype);
+            hookFunc = new DotTemplateInstanceExp(loc, hookFunc, Id._d_aaLen, tiargs);
+            Expression e = new CallExp(loc, hookFunc, e);
+            e = e.expressionSemantic(sc);
             return e;
         }
         else
@@ -4142,7 +5275,7 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
 
     /***************************************
      * `ident` was not found as a member of `mt`.
-     * Attempt to use overloaded opDot(), overloaded opDispatch(), or `alias this`.
+     * Attempt to use overloaded opDispatch() or `alias this`.
      * If that fails, forward to visitType().
      * Params:
      *  mt = class or struct
@@ -4188,6 +5321,8 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
             ident != Id._mangleof &&
             ident != Id.stringof &&
             ident != Id.offsetof &&
+            ident != Id.bitoffsetof &&
+            ident != Id.bitwidth &&
             // https://issues.dlang.org/show_bug.cgi?id=15045
             // Don't forward special built-in member functions.
             ident != Id.ctor &&
@@ -4196,21 +5331,6 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
             ident != Id.postblit &&
             ident != Id.__xpostblit)
         {
-            /* Look for overloaded opDot() to see if we should forward request
-             * to it.
-             */
-            if (auto fd = search_function(sym, Id.opDot))
-            {
-                /* Rewrite e.ident as:
-                 *  e.opDot().ident
-                 */
-                e = build_overload(e.loc, sc, e, null, fd);
-                // @@@DEPRECATED_2.110@@@.
-                // Deprecated in 2.082, made an error in 2.100.
-                error(e.loc, "`opDot` is obsolete. Use `alias this`");
-                return ErrorExp.get();
-            }
-
             /* Look for overloaded opDispatch to see if we should forward request
              * to it.
              */
@@ -4219,22 +5339,36 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
                 /* Rewrite e.ident as:
                  *  e.opDispatch!("ident")
                  */
-                TemplateDeclaration td = fd.isTemplateDeclaration();
-                if (!td)
-                {
-                    .error(fd.loc, "%s `%s` must be a template `opDispatch(string s)`, not a %s", fd.kind, fd.toPrettyChars, fd.kind());
-                    return returnExp(ErrorExp.get());
-                }
+
                 auto se = new StringExp(e.loc, ident.toString());
-                auto tiargs = new Objects();
-                tiargs.push(se);
+                auto tiargs = new Objects(se);
                 auto dti = new DotTemplateInstanceExp(e.loc, e, Id.opDispatch, tiargs);
-                dti.ti.tempdecl = td;
+
+                if (OverloadSet os = fd.isOverloadSet())
+                {
+                    if (!findTempDecl(dti, sc))
+                    {
+                        .error(fd.loc, "Couldn't find template declaration for opDispatch");
+                        return returnExp(ErrorExp.get());
+                    }
+                }
+                else
+                {
+                    TemplateDeclaration td = fd.isTemplateDeclaration();
+                    if (!td)
+                    {
+                        .error(fd.loc, "%s `%s` must be a template `opDispatch(string s)`, not a %s",
+                               fd.kind, fd.toPrettyChars, fd.kind());
+                        return returnExp(ErrorExp.get());
+                    }
+                    dti.ti.tempdecl = td;
+                }
+
                 /* opDispatch, which doesn't need IFTI,  may occur instantiate error.
                  * e.g.
                  *  template opDispatch(name) if (isValid!name) { ... }
                  */
-                uint errors = gagError ? global.startGagging() : 0;
+                const errors = gagError ? global.startGagging() : 0;
                 e = dti.dotTemplateSemanticProp(sc, DotExpFlag.none);
                 if (gagError && global.endGagging(errors))
                     e = null;
@@ -4252,7 +5386,7 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
                  */
                 auto die = new DotIdExp(e.loc, alias_e, ident);
 
-                auto errors = gagError ? 0 : global.startGagging();
+                const errors = gagError ? 0 : global.startGagging();
                 auto exp = die.dotIdSemanticProp(sc, gagError);
                 if (!gagError)
                 {
@@ -4282,7 +5416,7 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
         assert(e.op != EXP.dot);
 
         // https://issues.dlang.org/show_bug.cgi?id=14010
-        if (!(sc.flags & SCOPE.Cfile) && ident == Id._mangleof)
+        if (!sc.inCfile && ident == Id._mangleof)
         {
             return mt.getProperty(sc, e.loc, ident, flag & 1);
         }
@@ -4294,7 +5428,7 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
             /* Create a TupleExp out of the fields of the struct e:
              * (e.field0, e.field1, e.field2, ...)
              */
-            e = e.expressionSemantic(sc); // do this before turning on noaccesscheck
+            e = e.expressionSemantic(sc); // do this before turning on noAccessCheck
 
             if (!mt.sym.determineFields())
             {
@@ -4324,26 +5458,59 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
 
             e = new TupleExp(e.loc, e0, exps);
             Scope* sc2 = sc.push();
-            sc2.flags |= SCOPE.noaccesscheck;
+            sc2.noAccessCheck = true;
             e = e.expressionSemantic(sc2);
             sc2.pop();
             return e;
         }
 
-        immutable flags = sc.flags & SCOPE.ignoresymbolvisibility ? SearchOpt.ignoreVisibility : 0;
+        immutable flags = sc.ignoresymbolvisibility ? SearchOpt.ignoreVisibility : 0;
         s = mt.sym.search(e.loc, ident, flags | SearchOpt.ignorePrivateImports);
     L1:
         if (!s)
         {
             return noMember(mt, sc, e, ident, flag);
         }
-        if (!(sc.flags & SCOPE.ignoresymbolvisibility) && !symbolIsVisible(sc, s))
+        if (!sc.ignoresymbolvisibility && !symbolIsVisible(sc, s))
         {
             return noMember(mt, sc, e, ident, flag);
         }
         // check before alias resolution; the alias itself might be deprecated!
-        if (s.isAliasDeclaration)
+        if (auto ad = s.isAliasDeclaration)
+        {
             s.checkDeprecated(e.loc, sc);
+
+            // Fix for https://github.com/dlang/dmd/issues/20610
+            if (ad.originalType)
+            {
+                if (auto tid = ad.originalType.isTypeIdentifier())
+                {
+                    if (tid.idents.length)
+                    {
+                        static if (0)
+                        {
+                            printf("TypeStruct::dotExp(e = '%s', ident = '%s')\n", e.toChars(), ident.toChars());
+                            printf("AliasDeclaration: %s\n", ad.toChars());
+                            if (ad.aliassym)
+                                printf("aliassym: %s\n", ad.aliassym.toChars());
+                            printf("tid type: %s\n", toChars(tid));
+                        }
+                        /* Rewrite e.s as e.(tid.ident).(tid.idents)
+                         */
+                        Expression die = new DotIdExp(e.loc, e, tid.ident);
+                        foreach (id; tid.idents) // maybe use typeToExpressionHelper()
+                            die = new DotIdExp(e.loc, die, cast(Identifier)id);
+                        /* Ambiguous syntax, only way to disambiguate it to try it
+                         */
+                        die = dmd.expressionsem.trySemantic(die, sc);
+                        if (die && die.isDotVarExp())   // shrink wrap around DotVarExp()
+                        {
+                            return die;
+                        }
+                    }
+                }
+            }
+        }
         s = s.toAlias();
 
         if (auto em = s.isEnumMember())
@@ -4385,7 +5552,7 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
             }
         }
 
-        if (auto t = s.getType())
+        if (auto t = dmd.dsymbolsem.getType(s))
         {
             return (new TypeExp(e.loc, t)).expressionSemantic(sc);
         }
@@ -4446,7 +5613,7 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
         Declaration d = s.isDeclaration();
         if (!d)
         {
-            error(e.loc, "`%s.%s` is not a declaration", e.toChars(), ident.toChars());
+            error(e.loc, "`%s.%s` is not a declaration", e.toErrMsg(), ident.toChars());
             return ErrorExp.get();
         }
 
@@ -4574,9 +5741,12 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
 
             /* Create a TupleExp
              */
-            e = e.expressionSemantic(sc); // do this before turning on noaccesscheck
+            e = e.expressionSemantic(sc); // do this before turning on noAccessCheck
 
-            mt.sym.size(e.loc); // do semantic of type
+            {
+                import dmd.dsymbolsem: size;
+                mt.sym.size(e.loc); // do semantic of type
+            }
 
             Expression e0;
             Expression ev = e.op == EXP.type ? null : e;
@@ -4604,13 +5774,13 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
 
             e = new TupleExp(e.loc, e0, exps);
             Scope* sc2 = sc.push();
-            sc2.flags |= SCOPE.noaccesscheck;
+            sc2.noAccessCheck = true;
             e = e.expressionSemantic(sc2);
             sc2.pop();
             return e;
         }
 
-        SearchOptFlags flags = sc.flags & SCOPE.ignoresymbolvisibility ? SearchOpt.ignoreVisibility : SearchOpt.all;
+        SearchOptFlags flags = sc.ignoresymbolvisibility ? SearchOpt.ignoreVisibility : SearchOpt.all;
         s = mt.sym.search(e.loc, ident, flags | SearchOpt.ignorePrivateImports);
 
     L1:
@@ -4763,7 +5933,7 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
 
             return noMember(mt, sc, e, ident, flag & 1);
         }
-        if (!(sc.flags & SCOPE.ignoresymbolvisibility) && !symbolIsVisible(sc, s))
+        if (!sc.ignoresymbolvisibility && !symbolIsVisible(sc, s))
         {
             return noMember(mt, sc, e, ident, flag);
         }
@@ -4810,7 +5980,7 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
             }
         }
 
-        if (auto t = s.getType())
+        if (auto t = dmd.dsymbolsem.getType(s))
         {
             return (new TypeExp(e.loc, t)).expressionSemantic(sc);
         }
@@ -4879,7 +6049,7 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
         Declaration d = s.isDeclaration();
         if (!d)
         {
-            error(e.loc, "`%s.%s` is not a declaration", e.toChars(), ident.toChars());
+            error(e.loc, "`%s.%s` is not a declaration", e.toErrMsg(), ident.toChars());
             return ErrorExp.get();
         }
 
@@ -4901,7 +6071,7 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
                 && d.isFuncDeclaration().objc.selector)
             {
                 auto classRef = new ObjcClassReferenceExp(e.loc, mt.sym);
-                classRef.type = objc.getRuntimeMetaclass(mt.sym).getType();
+                classRef.type = dmd.dsymbolsem.getType((objc.getRuntimeMetaclass(mt.sym)));
                 return new DotVarExp(e.loc, classRef, d).expressionSemantic(sc);
             }
             else if (d.needThis() && sc.intypeof != 1)
@@ -4916,7 +6086,7 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
                     Expression e1;
                     Type t;
                     /* returns: true to continue, false to return */
-                    if (f.hasDualContext())
+                    if (f.hasDualContext)
                     {
                         if (f.followInstantiationContext(ad))
                         {
@@ -5038,6 +6208,74 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
     }
 }
 
+// if initializer is 0
+bool isZeroInit(Type t, Loc loc)
+{
+    bool visitType(Type _)
+    {
+        return false;       // assume not
+    }
+
+    bool visitBasic(TypeBasic t)
+    {
+        switch (t.ty)
+        {
+            case Tchar:
+            case Twchar:
+            case Tdchar:
+            case Timaginary32:
+            case Timaginary64:
+            case Timaginary80:
+            case Tfloat32:
+            case Tfloat64:
+            case Tfloat80:
+            case Tcomplex32:
+            case Tcomplex64:
+            case Tcomplex80:
+                return false; // no
+            default:
+                return true; // yes
+        }
+    }
+
+    bool visitVector(TypeVector t)
+    {
+        return t.basetype.isZeroInit(loc);
+    }
+
+    bool visitSArray(TypeSArray t)
+    {
+        return t.next.isZeroInit(loc);
+    }
+
+    bool visitStruct(TypeStruct t)
+    {
+        // Determine zeroInit here, as this can be called before semantic2
+        t.sym.determineSize(t.sym.loc);
+        return t.sym.zeroInit;
+    }
+
+    bool visitEnum(TypeEnum t)
+    {
+        return t.sym.getDefaultValue(loc).toBool().hasValue(false);
+    }
+
+    switch(t.ty)
+    {
+        default:               return t.isTypeBasic() ? visitBasic(cast(TypeBasic)t) : visitType(t);
+        case Tvector:          return visitVector(t.isTypeVector());
+        case Tsarray:          return visitSArray(t.isTypeSArray());
+        case Taarray:
+        case Tarray:
+        case Treference:
+        case Tdelegate:
+        case Tclass:
+        case Tpointer:         return true;
+        case Tstruct:          return visitStruct(t.isTypeStruct());
+        case Tenum:            return visitEnum(t.isTypeEnum());
+    }
+}
+
 
 /************************
  * Get the default initialization expression for a type.
@@ -5049,7 +6287,7 @@ Expression dotExp(Type mt, Scope* sc, Expression e, Identifier ident, DotExpFlag
  * Returns:
  *  The initialization expression for the type.
  */
-extern (C++) Expression defaultInit(Type mt, const ref Loc loc, const bool isCfile = false)
+Expression defaultInit(Type mt, Loc loc, const bool isCfile = false)
 {
     Expression visitBasic(TypeBasic mt)
     {
@@ -5216,6 +6454,204 @@ extern (C++) Expression defaultInit(Type mt, const ref Loc loc, const bool isCfi
     }
 }
 
+/*
+If `type` resolves to a dsymbol, then that
+dsymbol is returned.
+
+Params:
+  type = the type that is checked
+  sc   = the scope where the type is used
+
+Returns:
+  The dsymbol to which the type resolve or `null`
+  if the type does resolve to any symbol (for example,
+  in the case of basic types).
+*/
+Dsymbol toDsymbol(Type type, Scope* sc)
+{
+    Dsymbol visitType(Type _)            { return null; }
+    Dsymbol visitStruct(TypeStruct type) { return type.sym; }
+    Dsymbol visitEnum(TypeEnum type)     { return type.sym; }
+    Dsymbol visitClass(TypeClass type)   { return type.sym; }
+
+    Dsymbol visitTraits(TypeTraits type)
+    {
+        Type t;
+        Expression e;
+        Dsymbol s;
+        resolve(type, type.loc, sc, e, t, s);
+        if (t && t.ty != Terror)
+            s = t.toDsymbol(sc);
+        else if (e)
+            s = getDsymbol(e);
+
+        return s;
+    }
+
+    Dsymbol visitMixin(TypeMixin type)
+    {
+        Type t;
+        Expression e;
+        Dsymbol s;
+        resolve(type, type.loc, sc, e, t, s);
+        if (t)
+            s = t.toDsymbol(sc);
+        else if (e)
+            s = getDsymbol(e);
+
+        return s;
+    }
+
+    Dsymbol visitIdentifier(TypeIdentifier type)
+    {
+        //printf("TypeIdentifier::toDsymbol('%s')\n", toChars(type));
+        if (!sc)
+            return null;
+
+        Type t;
+        Expression e;
+        Dsymbol s;
+        resolve(type, type.loc, sc, e, t, s);
+        if (t && t.ty != Tident)
+            s = t.toDsymbol(sc);
+        if (e)
+            s = getDsymbol(e);
+        return s;
+    }
+
+    Dsymbol visitInstance(TypeInstance type)
+    {
+        Type t;
+        Expression e;
+        Dsymbol s;
+        //printf("TypeInstance::semantic(%s)\n", toChars());
+        resolve(type, type.loc, sc, e, t, s);
+        if (t && t.ty != Tinstance)
+            s = t.toDsymbol(sc);
+        return s;
+    }
+
+    Dsymbol visitTypeof(TypeTypeof type)
+    {
+        //printf("TypeTypeof::toDsymbol('%s')\n", toChars());
+        Expression e;
+        Type t;
+        Dsymbol s;
+        resolve(type, type.loc, sc, e, t, s);
+        return s;
+    }
+
+    Dsymbol visitReturn(TypeReturn type)
+    {
+        Expression e;
+        Type t;
+        Dsymbol s;
+        resolve(type, type.loc, sc, e, t, s);
+        return s;
+    }
+
+    switch(type.ty)
+    {
+        default:                return visitType(type);
+        case Ttraits:           return visitTraits(type.isTypeTraits());
+        case Tmixin:            return visitMixin(type.isTypeMixin());
+        case Tident:            return visitIdentifier(type.isTypeIdentifier());
+        case Tinstance:         return visitInstance(type.isTypeInstance());
+        case Ttypeof:           return visitTypeof(type.isTypeTypeof());
+        case Treturn:           return visitReturn(type.isTypeReturn());
+        case Tstruct:           return visitStruct(type.isTypeStruct());
+        case Tenum:             return visitEnum(type.isTypeEnum());
+        case Tclass:            return visitClass(type.isTypeClass());
+    }
+}
+
+/************************************
+ * Add storage class modifiers to type.
+ */
+Type addStorageClass(Type type, STC stc)
+{
+    Type visitType(Type t)
+    {
+        /* Just translate to MOD bits and let addMod() do the work
+         */
+        MOD mod = 0;
+        if (stc & STC.immutable_)
+            mod = MODFlags.immutable_;
+        else
+        {
+            if (stc & (STC.const_ | STC.in_))
+                mod |= MODFlags.const_;
+            if (stc & STC.wild)
+                mod |= MODFlags.wild;
+            if (stc & STC.shared_)
+                mod |= MODFlags.shared_;
+        }
+        return t.addMod(mod);
+    }
+
+    Type visitFunction(TypeFunction tf_src)
+    {
+        //printf("addStorageClass(%llx) %d\n", stc, (stc & STC.scope_) != 0);
+        TypeFunction t = visitType(tf_src).toTypeFunction();
+        if ((stc & STC.pure_ && !t.purity) ||
+            (stc & STC.nothrow_ && !t.isNothrow) ||
+            (stc & STC.nogc && !t.isNogc) ||
+            (stc & STC.scope_ && !t.isScopeQual) ||
+            (stc & STC.safe && t.trust < TRUST.trusted))
+        {
+            // Klunky to change these
+            auto tf = new TypeFunction(t.parameterList, t.next, t.linkage, STC.none);
+            tf.mod = t.mod;
+            tf.inferenceArguments = tf_src.inferenceArguments;
+            tf.purity = t.purity;
+            tf.isNothrow = t.isNothrow;
+            tf.isNogc = t.isNogc;
+            tf.isProperty = t.isProperty;
+            tf.isRef = t.isRef;
+            tf.isReturn = t.isReturn;
+            tf.isReturnScope = t.isReturnScope;
+            tf.isScopeQual = t.isScopeQual;
+            tf.isReturnInferred = t.isReturnInferred;
+            tf.isScopeInferred = t.isScopeInferred;
+            tf.trust = t.trust;
+            tf.isInOutParam = t.isInOutParam;
+            tf.isInOutQual = t.isInOutQual;
+            tf.isCtor = t.isCtor;
+
+            if (stc & STC.pure_)
+                tf.purity = PURE.fwdref;
+            if (stc & STC.nothrow_)
+                tf.isNothrow = true;
+            if (stc & STC.nogc)
+                tf.isNogc = true;
+            if (stc & STC.safe)
+                tf.trust = TRUST.safe;
+            if (stc & STC.scope_)
+            {
+                tf.isScopeQual = true;
+                if (stc & STC.scopeinferred)
+                    tf.isScopeInferred = true;
+            }
+
+            tf.deco = tf.merge().deco;
+            t = tf;
+        }
+        return t;
+    }
+
+    Type visitDelegate(TypeDelegate tdg)
+    {
+        TypeDelegate t = visitType(tdg).isTypeDelegate();
+        return t;
+    }
+
+    switch(type.ty)
+    {
+        default:            return visitType(type);
+        case Tfunction:     return visitFunction(type.isTypeFunction());
+        case Tdelegate:     return visitDelegate(type.isTypeDelegate());
+    }
+}
 
 /**********************************************
  * Extract complex type from core.stdc.config
@@ -5227,7 +6663,7 @@ extern (C++) Expression defaultInit(Type mt, const ref Loc loc, const bool isCfi
  *      Complex!float, Complex!double, Complex!real or null for error
  */
 
-Type getComplexLibraryType(const ref Loc loc, Scope* sc, TY ty)
+Type getComplexLibraryType(Loc loc, Scope* sc, TY ty)
 {
     // singleton
     __gshared Type complex_float;
@@ -5252,7 +6688,7 @@ Type getComplexLibraryType(const ref Loc loc, Scope* sc, TY ty)
         return *pt;
     *pt = Type.terror;
 
-    Module mConfig = Module.loadCoreStdcConfig();
+    Module mConfig = loadCoreStdcConfig();
     if (!mConfig)
     {
         error(loc, "`core.stdc.config` is required for complex numbers");
@@ -5266,7 +6702,7 @@ Type getComplexLibraryType(const ref Loc loc, Scope* sc, TY ty)
         return *pt;
     }
     s = s.toAlias();
-    if (auto t = s.getType())
+    if (auto t = dmd.dsymbolsem.getType(s))
     {
         if (auto ts = t.toBasetype().isTypeStruct())
         {
@@ -5295,7 +6731,7 @@ Type getComplexLibraryType(const ref Loc loc, Scope* sc, TY ty)
  * Returns:
  *     An enum value of either `Covariant.yes` or a reason it's not covariant.
  */
-Covariant covariant(Type src, Type t, StorageClass* pstc = null, bool cppCovariant = false)
+Covariant covariant(Type src, Type t, STC* pstc = null, bool cppCovariant = false)
 {
     version (none)
     {
@@ -5305,8 +6741,8 @@ Covariant covariant(Type src, Type t, StorageClass* pstc = null, bool cppCovaria
         printf("mod = %x, %x\n", src.mod, t.mod);
     }
     if (pstc)
-        *pstc = 0;
-    StorageClass stc = 0;
+        *pstc = STC.none;
+    STC stc = STC.none;
 
     bool notcovariant = false;
 
@@ -5366,16 +6802,16 @@ Covariant covariant(Type src, Type t, StorageClass* pstc = null, bool cppCovaria
                 goto Ldistinct;
             }
         Lcov:
-            notcovariant |= !fparam1.isCovariant(t1.isref, fparam2);
+            notcovariant |= !fparam1.isCovariant(t1.isRef, fparam2);
 
             /* https://issues.dlang.org/show_bug.cgi?id=23135
              * extern(C++) mutable parameters are not covariant with const.
              */
             if (t1.linkage == LINK.cpp && cppCovariant)
             {
-                notcovariant |= tp1.isNaked() != tp2.isNaked();
+                notcovariant |= tp1.isNaked != tp2.isNaked;
                 if (auto tpn1 = tp1.nextOf())
-                    notcovariant |= tpn1.isNaked() != tp2.nextOf().isNaked();
+                    notcovariant |= tpn1.isNaked != tp2.nextOf().isNaked;
             }
         }
     }
@@ -5426,7 +6862,7 @@ Covariant covariant(Type src, Type t, StorageClass* pstc = null, bool cppCovaria
         }
         else if (t1n.ty == t2n.ty && t1n.implicitConvTo(t2n))
         {
-            if (t1.isref && t2.isref)
+            if (t1.isRef && t2.isRef)
             {
                 // Treat like pointers to t1n and t2n
                 if (t1n.constConv(t2n) < MATCH.constant)
@@ -5451,37 +6887,37 @@ Covariant covariant(Type src, Type t, StorageClass* pstc = null, bool cppCovaria
     goto Lnotcovariant;
 
 Lcovariant:
-    if (t1.isref != t2.isref)
+    if (t1.isRef != t2.isRef)
         goto Lnotcovariant;
 
-    if (!t1.isref && (t1.isScopeQual || t2.isScopeQual))
+    if (!t1.isRef && (t1.isScopeQual || t2.isScopeQual))
     {
-        StorageClass stc1 = t1.isScopeQual ? STC.scope_ : 0;
-        StorageClass stc2 = t2.isScopeQual ? STC.scope_ : 0;
-        if (t1.isreturn)
+        STC stc1 = t1.isScopeQual ? STC.scope_ : STC.none;
+        STC stc2 = t2.isScopeQual ? STC.scope_ : STC.none;
+        if (t1.isReturn)
         {
             stc1 |= STC.return_;
             if (!t1.isScopeQual)
                 stc1 |= STC.ref_;
         }
-        if (t2.isreturn)
+        if (t2.isReturn)
         {
             stc2 |= STC.return_;
             if (!t2.isScopeQual)
                 stc2 |= STC.ref_;
         }
-        if (!Parameter.isCovariantScope(t1.isref, stc1, stc2))
+        if (!Parameter.isCovariantScope(t1.isRef, stc1, stc2))
             goto Lnotcovariant;
     }
 
     // We can subtract 'return ref' from 'this', but cannot add it
-    else if (t1.isreturn && !t2.isreturn)
+    else if (t1.isReturn && !t2.isReturn)
         goto Lnotcovariant;
 
     /* https://issues.dlang.org/show_bug.cgi?id=23135
      * extern(C++) mutable member functions are not covariant with const.
      */
-    if (t1.linkage == LINK.cpp && cppCovariant && t1.isNaked() != t2.isNaked())
+    if (t1.linkage == LINK.cpp && cppCovariant && t1.isNaked != t2.isNaked)
         goto Lnotcovariant;
 
     /* Can convert mutable to const
@@ -5508,10 +6944,10 @@ Lcovariant:
     if (!t1.purity && t2.purity)
         stc |= STC.pure_;
 
-    if (!t1.isnothrow && t2.isnothrow)
+    if (!t1.isNothrow && t2.isNothrow)
         stc |= STC.nothrow_;
 
-    if (!t1.isnogc && t2.isnogc)
+    if (!t1.isNogc && t2.isNogc)
         stc |= STC.nogc;
 
     /* Can convert safe/trusted to system
@@ -5540,6 +6976,1098 @@ Lnotcovariant:
     //printf("\tcovaraint: 2\n");
     return Covariant.no;
 }
+
+/************************************
+ * Take the specified storage class for p,
+ * and use the function signature to infer whether
+ * STC.scope_ and STC.return_ should be OR'd in.
+ * (This will not affect the name mangling.)
+ * Params:
+ *  tf = TypeFunction to use to get the signature from
+ *  tthis = type of `this` parameter, null if none
+ *  p = parameter to this function
+ *  outerVars = context variables p could escape into, if any
+ *  indirect = is this for an indirect or virtual function call?
+ * Returns:
+ *  storage class with STC.scope_ or STC.return_ OR'd in
+ */
+STC parameterStorageClass(TypeFunction tf, Type tthis, Parameter p, VarDeclarations* outerVars = null,
+    bool indirect = false)
+{
+    //printf("parameterStorageClass(p: %s)\n", p.toChars());
+    auto stc = p.storageClass;
+
+    // When the preview switch is enable, `in` parameters are `scope`
+    if (stc & STC.constscoperef)
+        return stc | STC.scope_;
+
+    if (stc & (STC.scope_ | STC.return_ | STC.lazy_) || tf.purity == PURE.impure)
+        return stc;
+
+    /* If haven't inferred the return type yet, can't infer storage classes
+     */
+    if (!tf.nextOf() || !tf.isNothrow)
+        return stc;
+
+    tf.purityLevel();
+
+    static bool mayHavePointers(Type t)
+    {
+        if (auto ts = t.isTypeStruct())
+        {
+            auto sym = ts.sym;
+            if (sym.members && !sym.determineFields() && sym.type != Type.terror)
+                // struct is forward referenced, so "may have" pointers
+                return true;
+        }
+        return t.hasPointers();
+    }
+
+    // See if p can escape via any of the other parameters
+    if (tf.purity == PURE.weak)
+    {
+        /*
+         * Indirect calls may escape p through a nested context
+         * See:
+         *   https://issues.dlang.org/show_bug.cgi?id=24212
+         *   https://issues.dlang.org/show_bug.cgi?id=24213
+         */
+        if (indirect)
+            return stc;
+
+        // Check escaping through parameters
+        foreach (i, fparam; tf.parameterList)
+        {
+            Type t = fparam.type;
+            if (!t)
+                continue;
+            t = t.baseElemOf();     // punch thru static arrays
+            if (t.isMutable() && t.hasPointers())
+            {
+                if (fparam.isReference() && fparam != p)
+                    return stc;
+
+                if (t.ty == Tdelegate)
+                    return stc;     // could escape thru delegate
+
+                if (t.ty == Tclass)
+                    return stc;
+
+                /* if t is a pointer to mutable pointer
+                 */
+                if (auto tn = t.nextOf())
+                {
+                    if (tn.isMutable() && mayHavePointers(tn))
+                        return stc;   // escape through pointers
+                }
+            }
+        }
+
+        // Check escaping through `this`
+        if (tthis && tthis.isMutable())
+        {
+            import dmd.dsymbolsem : hasPointers;
+            foreach (VarDeclaration v; isAggregate(tthis).fields)
+            {
+                if (v.hasPointers())
+                    return stc;
+            }
+        }
+
+        // Check escaping through nested context
+        if (outerVars && tf.isMutable())
+        {
+            import dmd.dsymbolsem : hasPointers;
+            foreach (VarDeclaration v; *outerVars)
+            {
+                if (v.hasPointers())
+                    return stc;
+            }
+        }
+    }
+
+    // Check escaping through return value
+    Type tret = tf.nextOf().toBasetype();
+    if (tf.isRef || tret.hasPointers())
+    {
+        return stc | STC.scope_ | STC.return_ | STC.returnScope;
+    }
+    else
+        return stc | STC.scope_;
+}
+
+bool isBaseOf(Type tthis, Type t, int* poffset)
+{
+    auto tc = tthis.isTypeClass();
+    if (!tc)
+        return false;
+
+    if (!t || t.ty != Tclass)
+        return false;
+
+    ClassDeclaration cd = t.isTypeClass().sym;
+    if (cd.semanticRun < PASS.semanticdone && !cd.isBaseInfoComplete())
+        cd.dsymbolSemantic(null);
+    if (tc.sym.semanticRun < PASS.semanticdone && !tc.sym.isBaseInfoComplete())
+        tc.sym.dsymbolSemantic(null);
+
+    if (tc.sym.isBaseOf(cd, poffset))
+        return true;
+
+    return false;
+}
+
+bool equivalent(Type src, Type t)
+{
+    return immutableOf(src).equals(t.immutableOf());
+}
+
+Type pointerTo(Type type)
+{
+    if (type.ty == Terror)
+        return type;
+    auto mcache = type.getMcache();
+    if (!mcache.pto)
+    {
+        Type t = new TypePointer(type);
+        if (type.ty == Tfunction)
+        {
+            t.deco = t.merge().deco;
+            mcache.pto = t;
+        }
+        else
+            mcache.pto = t.merge();
+    }
+    return mcache.pto;
+}
+
+Type referenceTo(Type type)
+{
+    if (type.ty == Terror)
+        return type;
+    auto mcache = type.getMcache();
+    if (!mcache.rto)
+    {
+        Type t = new TypeReference(type);
+        mcache.rto = t.merge();
+    }
+    return mcache.rto;
+}
+
+// Make corresponding static array type without semantic
+Type sarrayOf(Type type, dinteger_t dim)
+{
+    assert(type.deco);
+    Type t = new TypeSArray(type, new IntegerExp(Loc.initial, dim, Type.tsize_t));
+    // according to TypeSArray.semantic()
+    t = t.addMod(type.mod);
+    t = t.merge();
+    return t;
+}
+
+Type arrayOf(Type type)
+{
+    if (type.ty == Terror)
+        return type;
+    auto mcache = type.getMcache();
+    if (!mcache.arrayof)
+    {
+        Type t = new TypeDArray(type);
+        mcache.arrayof = t.merge();
+    }
+    return mcache.arrayof;
+}
+
+/********************************
+ * Convert to 'const'.
+ */
+Type constOf(Type type)
+{
+    //printf("Type::constOf() %p %s\n", type, type.toChars());
+    if (type.mod == MODFlags.const_)
+        return type;
+    if (type.mcache && type.mcache.cto)
+    {
+        assert(type.mcache.cto.mod == MODFlags.const_);
+        return type.mcache.cto;
+    }
+    Type t = type.makeConst();
+    t = t.merge();
+    t.fixTo(type);
+    //printf("-Type::constOf() %p %s\n", t, t.toChars());
+    return t;
+}
+
+/********************************
+ * Convert to 'immutable'.
+ */
+Type immutableOf(Type type)
+{
+    //printf("Type::immutableOf() %p %s\n", this, toChars());
+    if (type.isImmutable())
+        return type;
+    if (type.mcache && type.mcache.ito)
+    {
+        assert(type.mcache.ito.isImmutable());
+        return type.mcache.ito;
+    }
+    Type t = type.makeImmutable();
+    t = t.merge();
+    t.fixTo(type);
+    //printf("\t%p\n", t);
+    return t;
+}
+
+/********************************
+ * Make type mutable.
+ */
+Type mutableOf(Type type)
+{
+    //printf("Type::mutableOf() %p, %s\n", type, type.toChars());
+    Type t = type;
+    if (type.isImmutable())
+    {
+        type.getMcache();
+        t = type.mcache.ito; // immutable => naked
+        assert(!t || (t.isMutable() && !t.isShared()));
+    }
+    else if (type.isConst())
+    {
+        type.getMcache();
+        if (type.isShared())
+        {
+            if (type.isWild())
+                t = type.mcache.swcto; // shared wild const -> shared
+            else
+                t = type.mcache.sto; // shared const => shared
+        }
+        else
+        {
+            if (type.isWild())
+                t = type.mcache.wcto; // wild const -> naked
+            else
+                t = type.mcache.cto; // const => naked
+        }
+        assert(!t || t.isMutable());
+    }
+    else if (type.isWild())
+    {
+        type.getMcache();
+        if (type.isShared())
+            t = type.mcache.sto; // shared wild => shared
+        else
+            t = type.mcache.wto; // wild => naked
+        assert(!t || t.isMutable());
+    }
+    if (!t)
+    {
+        t = type.makeMutable();
+        t = t.merge();
+        t.fixTo(type);
+    }
+    else
+        t = t.merge();
+    assert(t.isMutable());
+    return t;
+}
+
+Type sharedOf(Type type)
+{
+    //printf("Type::sharedOf() %p, %s\n", type, type.toChars());
+    if (type.mod == MODFlags.shared_)
+        return type;
+    if (type.mcache && type.mcache.sto)
+    {
+        assert(type.mcache.sto.mod == MODFlags.shared_);
+        return type.mcache.sto;
+    }
+    Type t = type.makeShared();
+    t = t.merge();
+    t.fixTo(type);
+    //printf("\t%p\n", t);
+    return t;
+}
+
+Type sharedConstOf(Type type)
+{
+    //printf("Type::sharedConstOf() %p, %s\n", type, type.toChars());
+    if (type.mod == (MODFlags.shared_ | MODFlags.const_))
+        return type;
+    if (type.mcache && type.mcache.scto)
+    {
+        assert(type.mcache.scto.mod == (MODFlags.shared_ | MODFlags.const_));
+        return type.mcache.scto;
+    }
+    Type t = type.makeSharedConst();
+    t = t.merge();
+    t.fixTo(type);
+    //printf("\t%p\n", t);
+    return t;
+}
+
+/********************************
+ * Make type unshared.
+ *      0            => 0
+ *      const        => const
+ *      immutable    => immutable
+ *      shared       => 0
+ *      shared const => const
+ *      wild         => wild
+ *      wild const   => wild const
+ *      shared wild  => wild
+ *      shared wild const => wild const
+ */
+Type unSharedOf(Type type)
+{
+    //printf("Type::unSharedOf() %p, %s\n", type, type.toChars());
+    Type t = type;
+
+    if (type.isShared())
+    {
+        type.getMcache();
+        if (type.isWild())
+        {
+            if (type.isConst())
+                t = type.mcache.wcto; // shared wild const => wild const
+            else
+                t = type.mcache.wto; // shared wild => wild
+        }
+        else
+        {
+            if (type.isConst())
+                t = type.mcache.cto; // shared const => const
+            else
+                t = type.mcache.sto; // shared => naked
+        }
+        assert(!t || !t.isShared());
+    }
+
+    if (!t)
+    {
+        t = type.nullAttributes();
+        t.mod = type.mod & ~MODFlags.shared_;
+        t.ctype = type.ctype;
+        t = t.merge();
+        t.fixTo(type);
+    }
+    else
+        t = t.merge();
+    assert(!t.isShared());
+    return t;
+}
+
+/********************************
+ * Convert to 'wild'.
+ */
+Type wildOf(Type type)
+{
+    //printf("Type::wildOf() %p %s\n", type, type.toChars());
+    if (type.mod == MODFlags.wild)
+        return type;
+    if (type.mcache && type.mcache.wto)
+    {
+        assert(type.mcache.wto.mod == MODFlags.wild);
+        return type.mcache.wto;
+    }
+    Type t = type.makeWild();
+    t = t.merge();
+    t.fixTo(type);
+    //printf("\t%p %s\n", t, t.toChars());
+    return t;
+}
+
+Type wildConstOf(Type type)
+{
+    //printf("Type::wildConstOf() %p %s\n", type, type.toChars());
+    if (type.mod == MODFlags.wildconst)
+        return type;
+    if (type.mcache && type.mcache.wcto)
+    {
+        assert(type.mcache.wcto.mod == MODFlags.wildconst);
+        return type.mcache.wcto;
+    }
+    Type t = type.makeWildConst();
+    t = t.merge();
+    t.fixTo(type);
+    //printf("\t%p %s\n", t, t.toChars());
+    return t;
+}
+
+Type sharedWildOf(Type type)
+{
+    //printf("Type::sharedWildOf() %p, %s\n", type, type.toChars());
+    if (type.mod == (MODFlags.shared_ | MODFlags.wild))
+        return type;
+    if (type.mcache && type.mcache.swto)
+    {
+        assert(type.mcache.swto.mod == (MODFlags.shared_ | MODFlags.wild));
+        return type.mcache.swto;
+    }
+    Type t = type.makeSharedWild();
+    t = t.merge();
+    t.fixTo(type);
+    //printf("\t%p %s\n", t, t.toChars());
+    return t;
+}
+
+Type sharedWildConstOf(Type type)
+{
+    //printf("Type::sharedWildConstOf() %p, %s\n", type, type.toChars());
+    if (type.mod == (MODFlags.shared_ | MODFlags.wildconst))
+        return type;
+    if (type.mcache && type.mcache.swcto)
+    {
+        assert(type.mcache.swcto.mod == (MODFlags.shared_ | MODFlags.wildconst));
+        return type.mcache.swcto;
+    }
+    Type t = type.makeSharedWildConst();
+    t = t.merge();
+    t.fixTo(type);
+    //printf("\t%p %s\n", t, t.toChars());
+    return t;
+}
+
+Type nakedOf(Type type)
+{
+    //printf("Type::nakedOf() %p, %s\n", type, type.toChars());
+    if (type.mod == 0)
+        return type;
+    if (type.mcache) with(type.mcache)
+    {
+        // the cache has the naked type at the "identity" position, try to find it
+        if (cto && cto.mod == 0)
+            return cto;
+        if (ito && ito.mod == 0)
+            return ito;
+        if (sto && sto.mod == 0)
+            return sto;
+        if (scto && scto.mod == 0)
+            return scto;
+        if (wto && wto.mod == 0)
+            return wto;
+        if (wcto && wcto.mod == 0)
+            return wcto;
+        if (swto && swto.mod == 0)
+            return swto;
+        if (swcto && swcto.mod == 0)
+            return swcto;
+    }
+    Type t = type.nullAttributes();
+    t.mod = 0;
+    t = t.merge();
+    t.fixTo(type);
+    //printf("\t%p %s\n", t, t.toChars());
+    return t;
+}
+
+Type unqualify(Type type, uint m)
+{
+    Type t = type.mutableOf().unSharedOf();
+
+    Type tn = type.ty == Tenum ? null : type.nextOf();
+    if (tn && tn.ty != Tfunction)
+    {
+        Type utn = tn.unqualify(m);
+        if (utn != tn)
+        {
+            if (type.ty == Tpointer)
+                t = utn.pointerTo();
+            else if (type.ty == Tarray)
+                t = utn.arrayOf();
+            else if (type.ty == Tsarray)
+                t = new TypeSArray(utn, (cast(TypeSArray)type).dim);
+            else if (type.ty == Taarray)
+            {
+                t = new TypeAArray(utn, (cast(TypeAArray)type).index);
+            }
+            else
+                assert(0);
+
+            t = t.merge();
+        }
+    }
+    t = t.addMod(type.mod & ~m);
+    return t;
+}
+
+/**************************
+ * Return type with the top level of it being mutable.
+ *
+ * Params:
+ *  t = type for which the top level mutable version is being returned
+ *
+ * Returns:
+ *  type version with mutable top level
+ */
+Type toHeadMutable(const Type t)
+{
+    Type unqualType = cast(Type) t;
+    if (t.isTypeStruct() || t.isTypeClass())
+        return unqualType;
+
+    if (!t.mod)
+        return unqualType;
+    return unqualType.mutableOf();
+}
+
+Type aliasthisOf(Type type)
+{
+    auto ad = isAggregate(type);
+    if (!ad || !ad.aliasthis)
+        return null;
+
+    auto s = ad.aliasthis.sym;
+    if (s.isAliasDeclaration())
+        s = s.toAlias();
+
+    if (s.isTupleDeclaration())
+        return null;
+
+    if (auto vd = s.isVarDeclaration())
+    {
+        auto t = vd.type;
+        if (vd.needThis())
+            t = t.addMod(type.mod);
+        return t;
+    }
+    Dsymbol callable = s.isFuncDeclaration();
+    callable = callable ? callable : s.isTemplateDeclaration();
+    if (callable)
+    {
+        auto fd = resolveFuncCall(Loc.initial, null, callable, null, type, ArgumentList(), FuncResolveFlag.quiet);
+        if (!fd || fd.errors || !functionSemantic(fd))
+            return Type.terror;
+
+        auto t = fd.type.nextOf();
+        if (!t) // https://issues.dlang.org/show_bug.cgi?id=14185
+            return Type.terror;
+        t = t.substWildTo(type.mod == 0 ? MODFlags.mutable : type.mod);
+        return t;
+    }
+    if (auto d = s.isDeclaration())
+    {
+        assert(d.type);
+        return d.type;
+    }
+    if (auto ed = s.isEnumDeclaration())
+    {
+        return ed.type;
+    }
+
+    //printf("%s\n", s.kind());
+    return null;
+}
+
+/************************************
+ * Apply MODxxxx bits to existing type.
+ */
+Type castMod(Type type, MOD mod)
+{
+    Type t;
+    switch (mod)
+    {
+    case 0:
+        t = type.unSharedOf().mutableOf();
+        break;
+
+    case MODFlags.const_:
+        t = type.unSharedOf().constOf();
+        break;
+
+    case MODFlags.wild:
+        t = type.unSharedOf().wildOf();
+        break;
+
+    case MODFlags.wildconst:
+        t = type.unSharedOf().wildConstOf();
+        break;
+
+    case MODFlags.shared_:
+        t = type.mutableOf().sharedOf();
+        break;
+
+    case MODFlags.shared_ | MODFlags.const_:
+        t = type.sharedConstOf();
+        break;
+
+    case MODFlags.shared_ | MODFlags.wild:
+        t = type.sharedWildOf();
+        break;
+
+    case MODFlags.shared_ | MODFlags.wildconst:
+        t = type.sharedWildConstOf();
+        break;
+
+    case MODFlags.immutable_:
+        t = type.immutableOf();
+        break;
+
+    default:
+        assert(0);
+    }
+    return t;
+}
+
+Type substWildTo(Type type, uint mod)
+{
+    auto tf = type.isTypeFunction();
+    if (!tf)
+    {
+        //printf("+Type.substWildTo this = %s, mod = x%x\n", toChars(), mod);
+        Type t;
+
+        if (Type tn = type.nextOf())
+        {
+            // substitution has no effect on function pointer type.
+            if (type.ty == Tpointer && tn.ty == Tfunction)
+            {
+                t = type;
+                goto L1;
+            }
+
+            t = tn.substWildTo(mod);
+            if (t == tn)
+                t = type;
+            else
+            {
+                if (type.ty == Tpointer)
+                    t = t.pointerTo();
+                else if (type.ty == Tarray)
+                    t = t.arrayOf();
+                else if (type.ty == Tsarray)
+                    t = new TypeSArray(t, (cast(TypeSArray)type).dim.syntaxCopy());
+                else if (type.ty == Taarray)
+                {
+                    t = new TypeAArray(t, (cast(TypeAArray)type).index.substWildTo(mod));
+                }
+                else if (type.ty == Tdelegate)
+                {
+                    t = new TypeDelegate(t.isTypeFunction());
+                }
+                else
+                    assert(0);
+
+                t = t.merge();
+            }
+        }
+        else
+            t = type;
+
+    L1:
+        if (type.isWild())
+        {
+            if (mod == MODFlags.immutable_)
+            {
+                t = t.immutableOf();
+            }
+            else if (mod == MODFlags.wildconst)
+            {
+                t = t.wildConstOf();
+            }
+            else if (mod == MODFlags.wild)
+            {
+                if (type.isWildConst())
+                    t = t.wildConstOf();
+                else
+                    t = t.wildOf();
+            }
+            else if (mod == MODFlags.const_)
+            {
+                t = t.constOf();
+            }
+            else
+            {
+                if (type.isWildConst())
+                    t = t.constOf();
+                else
+                    t = t.mutableOf();
+            }
+        }
+        if (type.isConst())
+            t = t.addMod(MODFlags.const_);
+        if (type.isShared())
+            t = t.addMod(MODFlags.shared_);
+
+        //printf("-Type.substWildTo t = %s\n", t.toChars());
+        return t.merge();
+    }
+
+    if (!tf.iswild && !(tf.mod & MODFlags.wild))
+        return tf;
+
+    // Substitude inout qualifier of function type to mutable or immutable
+    // would break type system. Instead substitude inout to the most weak
+    // qualifer - const.
+    uint m = MODFlags.const_;
+
+    assert(tf.next);
+    Type tret = tf.next.substWildTo(m);
+    Parameters* params = tf.parameterList.parameters;
+    if (tf.mod & MODFlags.wild)
+        params = tf.parameterList.parameters.copy();
+    for (size_t i = 0; i < params.length; i++)
+    {
+        Parameter p = (*params)[i];
+        Type t = p.type.substWildTo(m);
+        if (t == p.type)
+            continue;
+        if (params == tf.parameterList.parameters)
+            params = tf.parameterList.parameters.copy();
+        (*params)[i] = new Parameter(p.loc, p.storageClass, t, null, null, null);
+    }
+    if (tf.next == tret && params == tf.parameterList.parameters)
+        return tf;
+
+    // Similar to TypeFunction.syntaxCopy;
+    auto t = new TypeFunction(ParameterList(params, tf.parameterList.varargs), tret, tf.linkage);
+    t.mod = ((tf.mod & MODFlags.wild) ? (tf.mod & ~MODFlags.wild) | MODFlags.const_ : tf.mod);
+    t.isNothrow = tf.isNothrow;
+    t.isNogc = tf.isNogc;
+    t.purity = tf.purity;
+    t.isProperty = tf.isProperty;
+    t.isRef = tf.isRef;
+    t.isReturn = tf.isReturn;
+    t.isReturnScope = tf.isReturnScope;
+    t.isScopeQual = tf.isScopeQual;
+    t.isReturnInferred = tf.isReturnInferred;
+    t.isScopeInferred = tf.isScopeInferred;
+    t.isInOutParam = false;
+    t.isInOutQual = false;
+    t.trust = tf.trust;
+    t.inferenceArguments = tf.inferenceArguments;
+    t.isCtor = tf.isCtor;
+    return t.merge();
+}
+
+/************************************
+ * Add MODxxxx bits to existing type.
+ * We're adding, not replacing, so adding const to
+ * a shared type => "shared const"
+ */
+Type addMod(Type type, MOD mod)
+{
+    /* Add anything to immutable, and it remains immutable
+     */
+    Type t = type;
+    if (!t.isImmutable())
+    {
+        //printf("addMod(%x) %s\n", mod, toChars());
+        switch (mod)
+        {
+        case 0:
+            break;
+
+        case MODFlags.const_:
+            if (type.isShared())
+            {
+                if (type.isWild())
+                    t = type.sharedWildConstOf();
+                else
+                    t = type.sharedConstOf();
+            }
+            else
+            {
+                if (type.isWild())
+                    t = type.wildConstOf();
+                else
+                    t = t.constOf();
+            }
+            break;
+
+        case MODFlags.wild:
+            if (type.isShared())
+            {
+                if (type.isConst())
+                    t = type.sharedWildConstOf();
+                else
+                    t = type.sharedWildOf();
+            }
+            else
+            {
+                if (type.isConst())
+                    t = type.wildConstOf();
+                else
+                    t = type.wildOf();
+            }
+            break;
+
+        case MODFlags.wildconst:
+            if (type.isShared())
+                t = type.sharedWildConstOf();
+            else
+                t = type.wildConstOf();
+            break;
+
+        case MODFlags.shared_:
+            if (type.isWild())
+            {
+                if (type.isConst())
+                    t = type.sharedWildConstOf();
+                else
+                    t = type.sharedWildOf();
+            }
+            else
+            {
+                if (type.isConst())
+                    t = type.sharedConstOf();
+                else
+                    t = type.sharedOf();
+            }
+            break;
+
+        case MODFlags.shared_ | MODFlags.const_:
+            if (type.isWild())
+                t = type.sharedWildConstOf();
+            else
+                t = type.sharedConstOf();
+            break;
+
+        case MODFlags.shared_ | MODFlags.wild:
+            if (type.isConst())
+                t = type.sharedWildConstOf();
+            else
+                t = type.sharedWildOf();
+            break;
+
+        case MODFlags.shared_ | MODFlags.wildconst:
+            t = type.sharedWildConstOf();
+            break;
+
+        case MODFlags.immutable_:
+            t = type.immutableOf();
+            break;
+
+        default:
+            assert(0);
+        }
+    }
+    return t;
+}
+
+/**
+ * Check whether this type has endless `alias this` recursion.
+ *
+ * Params:
+ *   t = type to check whether it has a recursive alias this
+ * Returns:
+ *   `true` if `t` has an `alias this` that can be implicitly
+ *    converted back to `t` itself.
+ */
+private bool checkAliasThisRec(Type t)
+{
+    Type tb = t.toBasetype();
+    AliasThisRec* pflag;
+    if (tb.ty == Tstruct)
+        pflag = &(cast(TypeStruct)tb).att;
+    else if (tb.ty == Tclass)
+        pflag = &(cast(TypeClass)tb).att;
+    else
+        return false;
+
+    AliasThisRec flag = cast(AliasThisRec)(*pflag & AliasThisRec.typeMask);
+    if (flag == AliasThisRec.fwdref)
+    {
+        Type att = aliasthisOf(t);
+        flag = att && att.implicitConvTo(t) ? AliasThisRec.yes : AliasThisRec.no;
+    }
+    *pflag = cast(AliasThisRec)(flag | (*pflag & ~AliasThisRec.typeMask));
+    return flag == AliasThisRec.yes;
+}
+
+/**************************************
+ * Check and set 'att' if 't' is a recursive 'alias this' type
+ *
+ * The goal is to prevent endless loops when there is a cycle in the alias this chain.
+ * Since there is no multiple `alias this`, the chain either ends in a leaf,
+ * or it loops back on itself as some point.
+ *
+ * Example: S0 -> (S1 -> S2 -> S3 -> S1)
+ *
+ * `S0` is not a recursive alias this, so this returns `false`, and a rewrite to `S1` can be tried.
+ * `S1` is a recursive alias this type, but since `att` is initialized to `null`,
+ * this still returns `false`, but `att1` is set to `S1`.
+ * A rewrite to `S2` and `S3` can be tried, but when we want to try a rewrite to `S1` again,
+ * we notice `att == t`, so we're back at the start of the loop, and this returns `true`.
+ *
+ * Params:
+ *   att = type reference used to detect recursion. Should be initialized to `null`.
+ *   t   = type of 'alias this' rewrite to attempt
+ *
+ * Returns:
+ *   `false` if the rewrite is safe, `true` if it would loop back around
+ */
+bool isRecursiveAliasThis(ref Type att, Type t)
+{
+    //printf("+isRecursiveAliasThis(att = %s, t = %s)\n", att ? att.toChars() : "null", t.toChars());
+    auto tb = t.toBasetype();
+    if (att && tb.equivalent(att))
+        return true;
+    if (!att && tb.checkAliasThisRec())
+        att = tb;
+    return false;
+}
+
+MATCH implicitConvToWithoutAliasThis(TypeStruct from, Type to)
+{
+    //printf("TypeStruct::implicitConvToWithoutAliasThis(%s => %s)\n", toChars(), to.toChars());
+
+    auto tos = to.isTypeStruct();
+    if (!(tos && from.sym == tos.sym))
+        return MATCH.nomatch;
+
+    if (from.mod == to.mod)
+        return MATCH.exact;
+
+    if (MODimplicitConv(from.mod, to.mod))
+        return MATCH.constant;
+
+    /* Check all the fields. If they can all be converted,
+     * allow the conversion.
+     */
+    MATCH m = MATCH.constant;
+    uint offset = ~0; // must never match a field offset
+    foreach (v; from.sym.fields[])
+    {
+        /* Why are we only looking at the first member of a union?
+         * The check should check for overlap of v with the previous field,
+         * not just starting at the same point
+         */
+        if (!global.params.fixImmutableConv && v.offset == offset) // v is at same offset as previous field
+            continue;       // ignore
+
+        Type tvf = v.type.addMod(from.mod);    // from type
+        Type tvt  = v.type.addMod(to.mod);     // to type
+
+        // field match
+        MATCH mf = tvf.implicitConvTo(tvt);
+        //printf("\t%s => %s, match = %d\n", v.type.toChars(), tvt.toChars(), mf);
+
+        if (mf == MATCH.nomatch)
+            return MATCH.nomatch;
+        if (mf < m) // if field match is worse
+            m = mf;
+        offset = v.offset;
+    }
+    return m;
+}
+
+MATCH implicitConvToWithoutAliasThis(TypeClass from, Type to)
+{
+    ClassDeclaration cdto = to.isClassHandle();
+    MATCH m = constConv(from, to);
+    if (m > MATCH.nomatch)
+        return m;
+
+    if (cdto && cdto.isBaseOf(from.sym, null) && MODimplicitConv(from.mod, to.mod))
+    {
+        //printf("'to' is base\n");
+        return MATCH.convert;
+    }
+    return MATCH.nomatch;
+}
+
+MATCH implicitConvToThroughAliasThis(TypeClass from, Type to)
+{
+    MATCH m;
+    if (from.sym.aliasthis && !(from.att & AliasThisRec.tracing))
+    {
+        if (auto ato = aliasthisOf(from))
+        {
+            from.att = cast(AliasThisRec)(from.att | AliasThisRec.tracing);
+            m = ato.implicitConvTo(to);
+            from.att = cast(AliasThisRec)(from.att & ~AliasThisRec.tracing);
+        }
+    }
+    return m;
+}
+
+MATCH implicitConvToThroughAliasThis(TypeStruct from, Type to)
+{
+    auto tos = to.isTypeStruct();
+    if (!(tos && from.sym == tos.sym) &&
+        from.sym.aliasthis &&
+        !(from.att & AliasThisRec.tracing))
+    {
+        if (auto ato = aliasthisOf(from))
+        {
+            from.att = cast(AliasThisRec)(from.att | AliasThisRec.tracing);
+            MATCH m = ato.implicitConvTo(to);
+            from.att = cast(AliasThisRec)(from.att & ~AliasThisRec.tracing);
+            return m;
+        }
+    }
+    return MATCH.nomatch;
+}
+
+/*******************************************
+ * Compute number of elements for a (possibly multidimensional) static array,
+ * or 1 for other types.
+ * Params:
+ *  t = static array type
+ *  loc = for error message
+ * Returns:
+ *  number of elements, uint.max on overflow
+ */
+uint numberOfElems(Type t, Loc loc)
+{
+    //printf("Type::numberOfElems()\n");
+    uinteger_t n = 1;
+    Type tb = t;
+    while ((tb = tb.toBasetype()).ty == Tsarray)
+    {
+        bool overflow = false;
+        n = mulu(n, (cast(TypeSArray)tb).dim.toUInteger(), overflow);
+        if (overflow || n >= uint.max)
+        {
+            error(loc, "static array `%s` size overflowed to %llu", t.toChars(), cast(ulong)n);
+            return uint.max;
+        }
+        tb = (cast(TypeSArray)tb).next;
+    }
+    return cast(uint)n;
+}
+
+bool checkRetType(TypeFunction tf, Loc loc)
+{
+    Type tb = tf.next.toBasetype();
+    if (tb.ty == Tfunction)
+    {
+        error(loc, "functions cannot return a function");
+        tf.next = Type.terror;
+    }
+    if (tb.ty == Ttuple)
+    {
+        error(loc, "functions cannot return a sequence (use `std.typecons.Tuple`)");
+        tf.next = Type.terror;
+    }
+    if (!tf.isRef && (tb.ty == Tstruct || tb.ty == Tsarray))
+    {
+        if (auto ts = tb.baseElemOf().isTypeStruct())
+        {
+            if (!ts.sym.members)
+            {
+                error(loc, "functions cannot return opaque type `%s` by value", tb.toChars());
+                tf.next = Type.terror;
+            }
+        }
+    }
+    if (tb.ty == Terror)
+        return true;
+    return false;
+}
+
+/// Returns: whether `t` is a struct/class/enum without a body
+bool isOpaqueType(Type t)
+{
+    if (auto te = t.isTypeEnum())
+        return te.sym.members is null;
+    if (auto ts = t.isTypeStruct())
+        return ts.sym.members is null;
+    if (auto tc = t.isTypeClass())
+        return tc.sym.members is null;
+    return false;
+}
+
 
 /******************************* Private *****************************************/
 
@@ -5662,8 +8190,7 @@ Type stripDefaultArgs(Type t)
         {
             foreach (i, p; *parameters)
             {
-                Parameter ps = stripParameter(p);
-                if (ps)
+                if (Parameter ps = stripParameter(p))
                 {
                     // Replace params with a copy we can modify
                     Parameters* nparams = new Parameters(parameters.length);
@@ -5740,11 +8267,11 @@ Type stripDefaultArgs(Type t)
  * Returns:
  *      corresponding value of .max/.min
  */
-Expression getMaxMinValue(EnumDeclaration ed, const ref Loc loc, Identifier id)
+Expression getMaxMinValue(EnumDeclaration ed, Loc loc, Identifier id)
 {
     //printf("EnumDeclaration::getMaxValue()\n");
 
-    static Expression pvalToResult(Expression e, const ref Loc loc)
+    static Expression pvalToResult(Expression e, Loc loc)
     {
         if (e.op != EXP.error)
         {
@@ -5779,7 +8306,7 @@ Expression getMaxMinValue(EnumDeclaration ed, const ref Loc loc, Identifier id)
         .error(loc, "%s `%s` is opaque and has no `.%s`", ed.kind, ed.toPrettyChars, id.toChars(), id.toChars());
         return errorReturn();
     }
-    if (!(ed.memtype && ed.memtype.isintegral()))
+    if (!(ed.memtype && ed.memtype.isIntegral()))
     {
         .error(loc, "%s `%s` has no `.%s` property because base type `%s` is not an integral type", ed.kind, ed.toPrettyChars, id.toChars(),
               id.toChars(), ed.memtype ? ed.memtype.toChars() : "");
@@ -5851,10 +8378,10 @@ Expression getMaxMinValue(EnumDeclaration ed, const ref Loc loc, Identifier id)
  * Return:
  *      null if error, else RootObject AST as parsed
  */
-RootObject compileTypeMixin(TypeMixin tm, ref const Loc loc, Scope* sc)
+RootObject compileTypeMixin(TypeMixin tm, Loc loc, Scope* sc)
 {
     OutBuffer buf;
-    if (expressionsToString(buf, sc, tm.exps))
+    if (expressionsToString(buf, sc, tm.exps, tm.loc, null, true))
         return null;
 
     const errors = global.errors;
@@ -5862,9 +8389,9 @@ RootObject compileTypeMixin(TypeMixin tm, ref const Loc loc, Scope* sc)
     buf.writeByte(0);
     const str = buf.extractSlice()[0 .. len];
     const bool doUnittests = global.params.parsingUnittestsRequired();
-    auto locm = adjustLocForMixin(str, loc, global.params.mixinOut);
-    scope p = new Parser!ASTCodegen(locm, sc._module, str, false, global.errorSink, &global.compileEnv, doUnittests);
-    p.transitionIn = global.params.v.vin;
+    scope p = new Parser!ASTCodegen(sc._module, str, false, global.errorSink, &global.compileEnv, doUnittests);
+    adjustLocForMixin(str, loc, *p.baseLoc, global.params.mixinOut);
+    p.linnum = p.baseLoc.startLine;
     p.nextToken();
     //printf("p.loc.linnum = %d\n", p.loc.linnum);
 

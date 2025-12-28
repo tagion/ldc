@@ -2,12 +2,12 @@
 /**
  * Dynamic array implementation.
  *
- * Copyright:   Copyright (C) 1999-2024 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2025 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 https://www.digitalmars.com, Walter Bright)
  * License:     $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
- * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/root/array.d, root/_array.d)
+ * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/compiler/src/dmd/root/array.d, root/_array.d)
  * Documentation:  https://dlang.org/phobos/dmd_root_array.html
- * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/src/dmd/root/array.d
+ * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/compiler/src/dmd/root/array.d
  */
 
 module dmd.root.array;
@@ -52,9 +52,21 @@ public:
     ~this() pure nothrow
     {
         debug (stomp) memset(data.ptr, 0xFF, data.length);
-        if (data.ptr != &smallarray[0])
+        if (data.ptr && data.ptr != &smallarray[0])
             mem.xfree(data.ptr);
     }
+
+    // this is using a template constraint because of ambiguity with this(size_t) when T is
+    // int, and c++ header generation doesn't accept wrapping this in static if
+    extern(D) this()(T[] elems ...) pure nothrow if (is(T == struct) || is(T == class))
+    {
+        this(elems.length);
+        foreach(i; 0 .. elems.length)
+        {
+            this[i] = elems[i];
+        }
+    }
+
     ///returns elements comma separated in []
     extern(D) const(char)[] toString() const
     {
@@ -1180,4 +1192,20 @@ pure nothrow @nogc @safe unittest
 
     b.popFront();
     assert(b == expected[]);
+}
+
+
+/// Test Array array constructor
+pure nothrow unittest
+{
+    //check to make sure that this works with the aliases in arraytypes.d
+    import dmd.rootobject;
+    alias Objects = Array!RootObject;
+
+    auto ro1 = new RootObject();
+    auto ro2 = new RootObject();
+
+    auto aoo = new Objects(ro1, ro2);
+    assert((*aoo)[0] is ro1);
+    assert((*aoo)[1] is ro2);
 }

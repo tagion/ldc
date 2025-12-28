@@ -21,6 +21,12 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Target/TargetMachine.h"
 
+#if LDC_LLVM_VER >= 1600
+#include "llvm/TargetParser/Host.h"
+#else
+#include "llvm/Support/Host.h"
+#endif
+
 #ifdef _WIN32
 #include <Windows.h>
 #endif
@@ -52,6 +58,69 @@ static std::string findProgramByName(llvm::StringRef name) {
 
 //////////////////////////////////////////////////////////////////////////////
 
+namespace {
+llvm::SmallVector<std::string, 2> findCCFallback() {
+  const auto &triple = *global.params.targetTriple;
+  llvm::Triple nativeTriple{ llvm::sys::getDefaultTargetTriple() };
+  const auto isNativeBuild =
+    opts::mTargetTriple.empty() || triple.isCompatibleWith(nativeTriple);
+
+  llvm::SmallVector<llvm::SmallVector<std::string, 2>, 3> choices;
+  if (triple.isWindowsMSVCEnvironment()) {
+#ifdef _WIN32
+    // by default, prefer clang-cl.exe (if in PATH) over cl.exe
+    // (e.g., no echoing of source filename being preprocessed to stderr)
+    choices = {
+      { "clang-cl.exe" },
+      { "cl.exe" },
+    };
+#else
+    choices = { { "clang-cl" } };
+#endif
+  } else if (isNativeBuild) {
+    choices = { { "cc" } };
+  } else if (triple.isOSDarwin()) {
+    // Cross-compiling for Apple is most probably done on an Apple machine
+    choices = { { "cc" } };
+  } else {
+    const auto tripleString = triple.getTriple();
+    choices = {
+      { tripleString + "-gcc" },
+      { tripleString + "-clang" },
+      { "clang", "--target=" + tripleString },
+    };
+  }
+
+
+  const auto verbose = global.params.v.verbose;
+  const auto logCross = verbose && !isNativeBuild;
+  if (logCross) message("Trying to find a C cross-compiler");
+
+  for (auto &choice : choices) {
+    auto fullPath = findProgramByName(choice[0]);
+    if (fullPath.empty()) {
+      if (logCross) message("Did not find C cross-compiler: `%s`", choice[0].c_str());
+      continue;
+    }
+
+    if (logCross) message("Found C cross-compiler: `%s`", fullPath.c_str());
+    choice[0] = fullPath;
+    return choice;
+  }
+
+  if (isNativeBuild) {
+    error(Loc(), "could not find C compiler `%s`", choices[0][0].c_str());
+  } else {
+    error(Loc(), "could not find a C cross-compiler for this cross-compilation");
+    tip("make sure you have a compiler like `%s` installed and set $CC or pass -gcc accordingly", choices[0][0].c_str());
+  }
+
+  fatal();
+}
+} // anonymous namespace
+
+////////////////////////////////////////////////////////////////////////////////
+
 std::string getProgram(const char *fallbackName,
                        const llvm::cl::opt<std::string> *opt,
                        const char *envVar) {
@@ -76,7 +145,50 @@ std::string getProgram(const char *fallbackName,
 
 ////////////////////////////////////////////////////////////////////////////////
 
-std::string getGcc(const char *fallback) { return getProgram(fallback, &gcc, "CC"); }
+namespace {
+std::string getCCImpl(std::vector<std::string> &additional_args) {
+  if (!gcc.empty())
+    return getProgram(nullptr, &gcc);
+
+  std::string cc = env::get("CC");
+  if (cc.empty()) {
+    auto fallback = findCCFallback();
+    additional_args.insert(additional_args.end(), fallback.begin() + 1, fallback.end());
+    return fallback[0];
+  }
+
+#ifdef _WIN32
+  // spaces in $CC are to be expected on Windows
+  // (e.g., `C:\Program Files\LLVM\bin\clang-cl.exe`)
+  return getProgram(cc.c_str(), &gcc);
+#else
+  // Posix: in case $CC contains spaces split it into a command and arguments
+  if (cc.find(' ') == cc.npos)
+    return getProgram(cc.c_str(), &gcc);
+
+  llvm::StringRef sr(cc);
+  llvm::SmallVector<llvm::StringRef, 8> args;
+  sr.split(args, ' ', /*MaxSplit=*/-1, /*keepEmpty=*/false);
+
+  // args[0] == CC command, args[1..] = CLI options
+  additional_args.reserve(additional_args.size() + args.size() - 1);
+  for (size_t i = 1; i < args.size(); i ++)
+    additional_args.emplace_back(args[i].str());
+  return getProgram(args[0].str().c_str(), &gcc);
+#endif
+}
+} // anonymous namespace
+
+std::string getCC(std::vector<std::string> &additional_args) {
+  static std::string cachedResult;
+  static std::vector<std::string> cachedArgs;
+
+  if (cachedResult.empty())
+    cachedResult = getCCImpl(cachedArgs);
+
+  additional_args.insert(additional_args.end(), cachedArgs.begin(), cachedArgs.end());
+  return cachedResult;
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -85,6 +197,13 @@ void appendTargetArgsForGcc(std::vector<std::string> &args) {
 
   const auto &triple = *global.params.targetTriple;
   const auto arch64 = triple.get64BitArchVariant().getArch();
+
+  // specify a -target triple for Apple targets (and Apple clang as C compiler)
+  if (triple.isOSDarwin()) {
+    args.push_back("-target");
+    args.push_back(triple.getTriple());
+    return;
+  }
 
   switch (arch64) {
   // Specify -m32/-m64 for architectures where gcc supports those flags.
@@ -211,7 +330,7 @@ std::vector<const char *> getFullArgs(const char *tool,
 
 ////////////////////////////////////////////////////////////////////////////////
 
-int executeToolAndWait(const Loc &loc, const std::string &tool_,
+int executeToolAndWait(Loc loc, const std::string &tool_,
                        const std::vector<std::string> &args, bool verbose) {
   const auto tool = findProgramByName(tool_);
   if (tool.empty()) {
@@ -253,28 +372,50 @@ int executeToolAndWait(const Loc &loc, const std::string &tool_,
 namespace windows {
 
 namespace {
+
+// cached 'singleton', lazily initialized (as that can be very expensive)
+const VSOptions &getVSOptions() {
+  static VSOptions vsOptions;
+  if (!vsOptions.VSInstallDir)
+    vsOptions.initialize();
+  return vsOptions;
+}
+
 bool setupMsvcEnvironmentImpl(
     bool forPreprocessingOnly,
     std::vector<std::pair<std::wstring, wchar_t *>> *rollback) {
-  const bool x64 = global.params.targetTriple->isArch64Bit();
+  const auto &triple = *global.params.targetTriple;
 
   if (env::has(L"VSINSTALLDIR") && !env::has(L"LDC_VSDIR_FORCE")) {
-    // Assume a fully set up environment (e.g., VS native tools command prompt).
-    // Skip the MSVC setup unless the environment is set up for a different
-    // target architecture.
-    const auto tgtArch = env::get("VSCMD_ARG_TGT_ARCH"); // VS 2017+
-    if (tgtArch.empty() || tgtArch == (x64 ? "x64" : "x86"))
-      return true;
+    const auto tripleArch = triple.getArch();
+    const char *expectedArch = nullptr;
+
+    if (tripleArch == llvm::Triple::ArchType::x86_64)
+      expectedArch = "x64";
+    else if (tripleArch == llvm::Triple::ArchType::x86)
+      expectedArch = "x86";
+    else if (tripleArch == llvm::Triple::ArchType::aarch64)
+      expectedArch = "arm64";
+    else if (tripleArch == llvm::Triple::ArchType::arm ||
+             tripleArch == llvm::Triple::ArchType::thumb)
+      expectedArch = "arm";
+
+    if (expectedArch) {
+      // Assume a fully set up environment (e.g., VS native tools command prompt).
+      // Skip the MSVC setup unless the environment is set up for a different
+      // target architecture.
+      const auto tgtArch = env::get("VSCMD_ARG_TGT_ARCH"); // VS 2017+
+      if (tgtArch.empty() || tgtArch == expectedArch)
+        return true;
+    }
   }
 
+  const bool x64 = triple.isArch64Bit();
   const auto begin = std::chrono::steady_clock::now();
 
-  static VSOptions vsOptions; // cache, as this can be expensive
-  if (!vsOptions.VSInstallDir) {
-    vsOptions.initialize();
-    if (!vsOptions.VSInstallDir)
-      return false;
-  }
+  auto &vsOptions = getVSOptions();
+  if (!vsOptions.VSInstallDir)
+    return false;
 
   // cache the environment variable prefixes too
   static llvm::SmallVector<const char *, 2> binPaths;
@@ -395,6 +536,15 @@ MsvcEnvironmentScope::~MsvcEnvironmentScope() {
     SetEnvironmentVariableW(pair.first.c_str(), pair.second);
     free(pair.second);
   }
+}
+
+std::string
+MsvcEnvironmentScope::tryResolveToolPath(const char *fileName) const {
+  const bool x64 = global.params.targetTriple->isArch64Bit();
+  const char *secondaryBindir = nullptr;
+  if (auto bindir = getVSOptions().getVCBinDir(x64, secondaryBindir))
+    return (llvm::Twine(bindir) + "\\" + fileName).str();
+  return fileName;
 }
 
 } // namespace windows

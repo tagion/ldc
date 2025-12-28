@@ -1,11 +1,11 @@
 /**
  * Defines enums common to dmd and dmd as parse library.
  *
- * Copyright:   Copyright (C) 1999-2024 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2025 by The D Language Foundation, All Rights Reserved
  * License:     $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
- * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/astenums.d, _astenums.d)
+ * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/compiler/src/dmd/astenums.d, _astenums.d)
  * Documentation:  https://dlang.org/phobos/dmd_astenums.html
- * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/src/dmd/astenums.d
+ * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/compiler/src/dmd/astenums.d
  */
 
 module dmd.astenums;
@@ -16,6 +16,15 @@ enum Sizeok : ubyte
     fwd,                /// size of aggregate is ready to compute
     inProcess,          /// in the midst of computing the size
     done,               /// size of aggregate is set correctly
+}
+
+/// D Language version
+enum Edition : ushort
+{
+    v2023 = 2023,    /// Edition.min for default edition
+    v2024,           /// first Edition
+    v2025,           /// next Edition
+                     /// use Edition.max for latest edition
 }
 
 enum Baseok : ubyte
@@ -41,7 +50,7 @@ alias MOD = ubyte;
 
 enum STC : ulong  // transfer changes to declaration.h
 {
-    undefined_          = 0,
+    none                = 0,
 
     static_             = 1,   /// `static`
     extern_             = 2,   /// `extern`
@@ -68,9 +77,10 @@ enum STC : ulong  // transfer changes to declaration.h
     ref_                = 0x4_0000,   /// `ref`
     scope_              = 0x8_0000,   /// `scope`
 
-    scopeinferred       = 0x20_0000,   /// `scope` has been inferred and should not be part of mangling, `scope_` must also be set
-    return_             = 0x40_0000,   /// 'return ref' or 'return scope' for function parameters
-    returnScope         = 0x80_0000,   /// if `ref return scope` then resolve to `ref` and `return scope`
+    scopeinferred       = 0x10_0000,   /// `scope` has been inferred and should not be part of mangling, `scope_` must also be set
+    return_             = 0x20_0000,   /// 'return ref' or 'return scope' for function parameters
+    returnScope         = 0x40_0000,   /// if `ref return scope` then resolve to `ref` and `return scope`
+    returnRef           = 0x80_0000,   /// if `return ref`
 
     returninferred      = 0x100_0000,   /// `return` has been inferred and should not be part of mangling, `return_` must also be set
     immutable_          = 0x200_0000,   /// `immutable`
@@ -134,6 +144,9 @@ enum STC : ulong  // transfer changes to declaration.h
 
 }
 
+// Alias for C++ interface functions which use plain integer instead of enum class,
+// since C++ enum class doesn't support | & and conversion to bool. Maybe this can
+// be refactored to a struct with operator overloads or bit fields at some point.
 alias StorageClass = ulong;
 
 /********
@@ -152,7 +165,7 @@ bool isRefReturnScope(const ulong stc)
 
 /* This is different from the one in declaration.d, make that fix a separate PR */
 static if (0)
-extern (C++) __gshared const(StorageClass) STCStorageClass =
+__gshared const(StorageClass) STCStorageClass =
     (STC.auto_ | STC.scope_ | STC.static_ | STC.extern_ | STC.const_ | STC.final_ |
      STC.abstract_ | STC.synchronized_ | STC.deprecated_ | STC.override_ | STC.lazy_ |
      STC.alias_ | STC.out_ | STC.in_ | STC.manifest | STC.immutable_ | STC.shared_ |
@@ -293,7 +306,7 @@ enum ThreeState : ubyte
 enum TRUST : ubyte
 {
     default_   = 0,
-    system     = 1,    // @system (same as TRUST.default)
+    system     = 1,    // @system (same as TRUST.default_ unless feature "safer" is enabled)
     trusted    = 2,    // @trusted
     safe       = 3,    // @safe
 }
@@ -441,12 +454,35 @@ enum FileType : ubyte
     c,    /// C source file
 }
 
+/// In which context checks for assertions, contracts, bounds checks etc. are enabled
+enum CHECKENABLE : ubyte
+{
+    _default,     /// initial value
+    off,          /// never do checking
+    on,           /// always do checking
+    safeonly,     /// do checking only in @safe functions
+}
+
+/// What should happend when an assertion fails
+enum CHECKACTION : ubyte
+{
+    D,            /// call D assert on failure
+    C,            /// call C assert on failure
+    halt,         /// cause program halt on failure
+    context,      /// call D assert with the error context on failure
+}
+
 extern (C++) struct structalign_t
 {
   private:
     ushort value = 0;  // unknown
     enum STRUCTALIGN_DEFAULT = 1234;   // default = match whatever the corresponding C compiler does
-    bool pack;         // use #pragma pack semantics
+    ubyte flags;       // Align semantic flags
+    enum : ubyte
+    {
+        PACK = 0x1,     // use #pragma pack semantics
+        ALIGNAS = 0x2,  // use _Alignas semantics
+    }
 
   public:
   pure @safe @nogc nothrow:
@@ -456,6 +492,14 @@ extern (C++) struct structalign_t
     void setUnknown()      { value = 0; }
     void set(uint value)   { this.value = cast(ushort)value; }
     uint get() const       { return value; }
-    bool isPack() const    { return pack; }
-    void setPack(bool pack) { this.pack = pack; }
+    bool isPack() const    { return !!(flags & PACK); }
+    void setPack()         { flags |= PACK; }
+    bool fromAlignas() const { return !!(flags & ALIGNAS); }
+    void setAlignas()      { flags |= ALIGNAS; }
+}
+
+/// Use to return D arrays from C++ functions
+extern (C++) struct DArray(T)
+{
+    T[] data;
 }

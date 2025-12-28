@@ -24,7 +24,7 @@ extern(C++) struct S22323
 
 void test22323()
 {
-    import cppnew;
+    import core.stdcpp.new_;
 
     assert(C22323.ctorCount == 0);
     assert(C22323.dtorCount == 0);
@@ -107,4 +107,7 @@ void main()
 {
     test22323();
     test19660();
+
+    import binding;
+    assert(testExternalImportVar == 0xF1234);
 }

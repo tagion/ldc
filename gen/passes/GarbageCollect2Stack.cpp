@@ -24,6 +24,9 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSwitch.h"
+#if LDC_LLVM_VER >= 2100
+#include "llvm/IR/AbstractCallSite.h"
+#endif
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Dominators.h"
@@ -69,8 +72,6 @@ struct G2StackAnalysis {
 
 void EmitMemSet(IRBuilder<> &B, Value *Dst, Value *Val, Value *Len,
                 const G2StackAnalysis &A) {
-  Dst = B.CreateBitCast(Dst, PointerType::getUnqual(B.getInt8Ty()));
-
   MaybeAlign Align(1);
 
   auto CS = B.CreateMemSet(Dst, Val, Len, Align, false /*isVolatile*/);
@@ -185,7 +186,7 @@ Value* ArrayFI::promote(CallBase *CB, IRBuilder<> &B, const G2StackAnalysis &A) 
 
   if (Initialized) {
     // For now, only zero-init is supported.
-    uint64_t size = A.DL.getTypeStoreSize(Ty);
+    uint64_t size = A.DL.getTypeAllocSize(Ty);
     Value *TypeSize = ConstantInt::get(arrSize->getType(), size);
     // The initialization must be put at the original source variable
     // definition location, because it could be in a loop and because
@@ -197,9 +198,7 @@ Value* ArrayFI::promote(CallBase *CB, IRBuilder<> &B, const G2StackAnalysis &A) 
   if (ReturnType == ReturnType::Array) {
     Value *arrStruct = llvm::UndefValue::get(CB->getType());
     arrStruct = Builder.CreateInsertValue(arrStruct, arrSize, 0);
-    Value *memPtr =
-        Builder.CreateBitCast(alloca, PointerType::getUnqual(B.getInt8Ty()));
-    arrStruct = Builder.CreateInsertValue(arrStruct, memPtr, 1);
+    arrStruct = Builder.CreateInsertValue(arrStruct, alloca, 1);
     return arrStruct;
   }
 
@@ -284,7 +283,7 @@ Value* UntypedMemoryFI::promote(CallBase *CB, IRBuilder<> &B, const G2StackAnaly
   AllocaInst *alloca =
       B.CreateAlloca(Ty, count, ".nongc_mem"); // FIXME: align?
 
-  return B.CreateBitCast(alloca, CB->getType());
+  return alloca;
 }
 //}
 
@@ -354,7 +353,23 @@ static void RemoveCall(CallBase *CB, const G2StackAnalysis &A) {
 
   // Remove the runtime call.
   if (A.CGNode) {
+#if LDC_LLVM_VER >= 2100
+    //FIXME: Look into using `LazyCallGraph` and the new pass manager
+    for (auto I = A.CGNode->begin(); ; I++) {
+      assert(I != A.CGNode->end() && "Cannot find callsite to remove!");
+      if (I->first && *I->first == CB) {
+        A.CGNode->removeCallEdge(I);
+
+        // Remove all references to callback functions if there are any.
+        forEachCallbackFunction(*CB, [=](Function *_CB) {
+          A.CGNode->removeOneAbstractEdgeTo(A.CG->getOrInsertFunction(_CB));
+        });
+        break;
+      }
+    }
+#else
     A.CGNode->removeCallEdgeFor(*CB);
+#endif
   }
   static_cast<Instruction *>(CB)->eraseFromParent();
 }
@@ -454,9 +469,7 @@ bool GarbageCollect2Stack::run(Function &F, std::function<DominatorTree& ()> get
 
       // Make sure the type is the same as it was before, and replace all
       // uses of the runtime call with the alloca.
-      if (newVal->getType() != CB->getType()) {
-        newVal = Builder.CreateBitCast(newVal, CB->getType());
-      }
+      assert(newVal->getType() == CB->getType());
       static_cast<Instruction *>(CB)->replaceAllUsesWith(newVal);
 
       RemoveCall(CB, A);
@@ -732,7 +745,14 @@ bool isSafeToStackAllocate(BasicBlock::iterator Alloc, Value *V,
       auto B = CB->arg_begin(), E = CB->arg_end();
       for (auto A = B; A != E; ++A) {
         if (A->get() == V) {
+#if LDC_LLVM_VER >= 2100
+          if (!(CB->paramHasAttr(A - B, llvm::Attribute::AttrKind::Captures) &&
+                capturesNothing(
+                    CB->getParamAttr(A - B, llvm::Attribute::AttrKind::Captures)
+                        .getCaptureInfo()))) {
+#else
           if (!CB->paramHasAttr(A - B, llvm::Attribute::AttrKind::NoCapture)) {
+#endif
             // The parameter is not marked 'nocapture' - captured.
             return false;
           }

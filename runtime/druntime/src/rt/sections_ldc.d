@@ -35,7 +35,6 @@ else version (Windows) {}
 else version (WASI) {}
 else version (LDC):
 
-import core.stdc.stdlib : alloca;
 import rt.minfo;
 debug(PRINTF) import core.stdc.stdio : printf;
 

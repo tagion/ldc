@@ -75,6 +75,8 @@ AsmParserCommon *asmparser = nullptr;
 #include "asm-x86.h" // x86_64 assembly parser
 #undef ASM_X86_64
 
+using namespace dmd;
+
 /**
  * Replaces <<func>> with the name of the currently codegen'd function.
  *
@@ -95,14 +97,10 @@ static void replace_func_name(IRState *p, std::string &insnt) {
   }
 }
 
-Statement *gccAsmSemantic(GccAsmStatement *s, Scope *sc);
-
 Statement *asmSemantic(AsmStatement *s, Scope *sc) {
   if (!s->tokens) {
     return nullptr;
   }
-
-  sc->func->hasReturnExp |= 8;
 
   // GCC-style asm starts with a string literal or a `(`
   if (s->tokens->value == TOK::string_ ||
@@ -112,10 +110,13 @@ Statement *asmSemantic(AsmStatement *s, Scope *sc) {
   }
 
   // this is DMD-style asm
-  sc->func->hasReturnExp |= 32;
+  sc->func->hasInlineAsm(true);
+
+  const auto caseSensitive = s->caseSensitive();
 
   auto ias = createInlineAsmStatement(s->loc, s->tokens);
   s = ias;
+  s->caseSensitive(caseSensitive);
 
   bool err = false;
   llvm::Triple const &t = *global.params.targetTriple;
@@ -161,7 +162,7 @@ void AsmStatement_toIR(InlineAsmStatement *stmt, IRState *irs) {
   LOG_SCOPE;
 
   // sanity check
-  assert((irs->func()->decl->hasReturnExp & 40) == 40);
+  assert(irs->func()->decl->hasInlineAsm());
 
   // get asm block
   IRAsmBlock *asmblock = irs->asmBlock;
@@ -507,10 +508,13 @@ void CompoundAsmStatement_toIR(CompoundAsmStatement *stmt, IRState *p) {
 
     // we use a simple static counter to make sure the new end labels are
     // unique
-    static size_t uniqueLabelsId = 0;
     std::ostringstream asmGotoEndLabel;
-    printLabelName(asmGotoEndLabel, fdmangle, "_llvm_asm_end");
-    asmGotoEndLabel << uniqueLabelsId++;
+    {
+      static size_t uniqueLabelsId = 0;
+      std::string suffix = "_llvm_asm_end";
+      suffix += std::to_string(uniqueLabelsId++);
+      printLabelName(asmGotoEndLabel, fdmangle, suffix.c_str());
+    }
 
     // initialize the setter statement we're going to build
     auto outSetterStmt = new IRAsmStmt;

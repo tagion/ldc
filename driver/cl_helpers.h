@@ -166,18 +166,41 @@ public:
 /// (Errors on empty strings)
 class StringsAdapter {
   const char *name;
-  Strings **arrp;
+  Strings *arrp;
 
 public:
-  StringsAdapter(const char *name_, Strings *&arr) {
+  StringsAdapter(const char *name_, Strings &arr) {
     name = name_;
     arrp = &arr;
     assert(name);
-    assert(arrp);
   }
 
   void push_back(const char *cstr);
 
+  void push_back(const std::string &str) { push_back(str.c_str()); }
+};
+
+class ImportPathsAdapter {
+  const char *name;
+  Array<ImportPathInfo> *arrp;
+  bool isExternal;
+
+public:
+  ImportPathsAdapter(const char *name_, Array<ImportPathInfo> &arr, bool isExternal_) {
+    name = name_;
+    arrp = &arr;
+    isExternal = isExternal_;
+    assert(name);
+  }
+
+  void push_back(const char *cstr);
+
+  void push_back(const std::string &str) { push_back(str.c_str()); }
+};
+
+class EditionsAdapter {
+public:
+  void push_back(const char *cstr);
   void push_back(const std::string &str) { push_back(str.c_str()); }
 };
 }

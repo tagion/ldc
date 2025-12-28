@@ -10,7 +10,7 @@
 
 module core.internal.atomic;
 
-import core.atomic : MemoryOrder, has128BitCAS;
+import core.atomic : has128BitCAS, MemoryOrder;
 
 version (LDC)
 {
@@ -787,7 +787,7 @@ else version (GNU)
     import gcc.builtins;
     import gcc.config;
 
-    enum IsAtomicLockFree(T) = __atomic_is_lock_free(T.sizeof, null);
+    enum IsAtomicLockFree(T) = __traits(compiles, { enum E = __atomic_is_lock_free(T.sizeof, null); });
 
     inout(T) atomicLoad(MemoryOrder order = MemoryOrder.seq, T)(inout(T)* src) pure nothrow @nogc @trusted
         if (CanCAS!T)
@@ -920,7 +920,7 @@ else version (GNU)
     }
 
     T atomicExchange(MemoryOrder order = MemoryOrder.seq, bool result = true, T)(T* dest, T value) pure nothrow @nogc @trusted
-        if (is(T : ulong) || is(T == class) || is(T == interface) || is(T U : U*))
+        if (CanCAS!T)
     {
         static assert(order != MemoryOrder.acq, "Invalid MemoryOrder for atomicExchange()");
 
@@ -1090,7 +1090,7 @@ else version (GNU)
         {
             static if (GNU_Thread_Model == ThreadModel.Posix)
             {
-                import core.sys.posix.pthread;
+                import core.sys.posix.sys.types : pthread_mutex_t, pthread_mutexattr_t;
                 alias atomicMutexHandle = pthread_mutex_t;
 
                 pragma(mangle, "pthread_mutex_init") int fakePureMutexInit(pthread_mutex_t*, pthread_mutexattr_t*);
@@ -1099,7 +1099,7 @@ else version (GNU)
             }
             else static if (GNU_Thread_Model == ThreadModel.Win32)
             {
-                import core.sys.windows.winbase;
+                import core.sys.windows.winbase : CRITICAL_SECTION;
                 alias atomicMutexHandle = CRITICAL_SECTION;
 
                 pragma(mangle, "InitializeCriticalSection") int fakePureMutexInit(CRITICAL_SECTION*);
@@ -1161,7 +1161,7 @@ else version (GNU)
         // Internal static mutex reference.
         private AtomicMutex* _getAtomicMutex() @trusted @nogc nothrow
         {
-            __gshared static AtomicMutex mutex;
+            __gshared AtomicMutex mutex;
             return &mutex;
         }
 

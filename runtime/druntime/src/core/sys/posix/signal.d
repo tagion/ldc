@@ -136,7 +136,7 @@ version (Solaris)
     import core.sys.posix.unistd;
 
     @property int SIGRTMIN() nothrow @nogc {
-        __gshared static int sig = -1;
+        __gshared int sig = -1;
         if (sig == -1) {
             sig = cast(int)sysconf(_SC_SIGRT_MIN);
         }
@@ -144,7 +144,7 @@ version (Solaris)
     }
 
     @property int SIGRTMAX() nothrow @nogc {
-        __gshared static int sig = -1;
+        __gshared int sig = -1;
         if (sig == -1) {
             sig = cast(int)sysconf(_SC_SIGRT_MAX);
         }
@@ -179,16 +179,16 @@ else version (linux)
         int __libc_current_sigrtmax();
     }
 
-    @property int SIGRTMIN() nothrow @nogc {
-        __gshared static int sig = -1;
+    @property int SIGRTMIN()() nothrow @nogc {
+        __gshared int sig = -1;
         if (sig == -1) {
             sig = __libc_current_sigrtmin();
         }
         return sig;
     }
 
-    @property int SIGRTMAX() nothrow @nogc {
-        __gshared static int sig = -1;
+    @property int SIGRTMAX()() nothrow @nogc {
+        __gshared int sig = -1;
         if (sig == -1) {
             sig = __libc_current_sigrtmax();
         }
@@ -1012,12 +1012,12 @@ version (linux)
         } _sifields_t _sifields;
 
     nothrow @nogc:
-        @property ref pid_t si_pid() return { return _sifields._kill.si_pid; }
-        @property ref uid_t si_uid() return { return _sifields._kill.si_uid; }
-        @property ref void* si_addr() return { return _sifields._sigfault.si_addr; }
-        @property ref int si_status() return { return _sifields._sigchld.si_status; }
-        @property ref c_long si_band() return { return _sifields._sigpoll.si_band; }
-        @property ref sigval si_value() return { return _sifields._rt.si_sigval; }
+        @property ref pid_t si_pid()() { return _sifields._kill.si_pid; }
+        @property ref uid_t si_uid()() { return _sifields._kill.si_uid; }
+        @property ref void* si_addr()() { return _sifields._sigfault.si_addr; }
+        @property ref int si_status()() { return _sifields._sigchld.si_status; }
+        @property ref c_long si_band()() { return _sifields._sigpoll.si_band; }
+        @property ref sigval si_value()() { return _sifields._rt.si_sigval; }
     }
 
     enum
@@ -2754,6 +2754,16 @@ else version (CRuntime_Musl)
         enum SIGSTKSZ    = 10240;
     }
     else version (X86_Any)
+    {
+        enum MINSIGSTKSZ = 2048;
+        enum SIGSTKSZ    = 8192;
+    }
+    else version (LoongArch64)
+    {
+        enum MINSIGSTKSZ = 4096;
+        enum SIGSTKSZ    = 16384;
+    }
+    else version (RISCV64)
     {
         enum MINSIGSTKSZ = 2048;
         enum SIGSTKSZ    = 8192;

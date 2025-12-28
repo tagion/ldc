@@ -15,14 +15,12 @@ version (CRuntime_WASI) {} else static assert(0);
 
 // CHECK: @_D4wasi13definedGlobali = global i32 123
 int definedGlobal = 123;
-// CHECK: @_D4wasi14declaredGlobali = external global i32
-extern int declaredGlobal;
 
 
 // make sure the ModuleInfo ref is emitted into the __minfo section:
 
-// CHECK: @_D4wasi11__moduleRefZ = linkonce_odr hidden global {{%object\.ModuleInfo\*|ptr}} {{.*}}, section "__minfo"
-// CHECK: @llvm.used = appending global [1 x {{i8\*|ptr}}] [{{i8\*|ptr}} {{.*}}@_D4wasi11__moduleRefZ
+// CHECK: @_D4wasi11__moduleRefZ = linkonce_odr hidden global ptr {{.*}}, section "__minfo"
+// CHECK: @llvm.used = appending global [1 x ptr] [ptr {{.*}}@_D4wasi11__moduleRefZ
 
 
 // test the magic linker symbols via linkability of the following:

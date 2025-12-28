@@ -1,12 +1,12 @@
 /**
  * The base class for a D symbol, which can be a module, variable, function, enum, etc.
  *
- * Copyright:   Copyright (C) 1999-2024 by The D Language Foundation, All Rights Reserved
+ * Copyright:   Copyright (C) 1999-2025 by The D Language Foundation, All Rights Reserved
  * Authors:     $(LINK2 https://www.digitalmars.com, Walter Bright)
  * License:     $(LINK2 https://www.boost.org/LICENSE_1_0.txt, Boost License 1.0)
- * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/src/dmd/dsymbol.d, _dsymbol.d)
+ * Source:      $(LINK2 https://github.com/dlang/dmd/blob/master/compiler/src/dmd/dsymbol.d, _dsymbol.d)
  * Documentation:  https://dlang.org/phobos/dmd_dsymbol.html
- * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/src/dmd/dsymbol.d
+ * Coverage:    https://codecov.io/gh/dlang/dmd/src/master/compiler/src/dmd/dsymbol.d
  */
 
 module dmd.dsymbol;
@@ -22,7 +22,6 @@ import dmd.arraytypes;
 import dmd.attrib;
 import dmd.astenums;
 import dmd.ast_node;
-import dmd.gluelayer;
 import dmd.dclass;
 import dmd.declaration;
 import dmd.denum;
@@ -35,7 +34,6 @@ import dmd.dtemplate;
 import dmd.errors;
 import dmd.expression;
 import dmd.func;
-import dmd.globals;
 import dmd.id;
 import dmd.identifier;
 import dmd.init;
@@ -62,7 +60,7 @@ version (IN_LLVM)
 }
 
 /***************************************
- * Calls dg(Dsymbol *sym) for each Dsymbol.
+ * Calls dg(Dsymbol* sym) for each Dsymbol.
  * If dg returns !=0, stops and returns that value else returns 0.
  * Params:
  *    symbols = Dsymbols
@@ -91,7 +89,7 @@ int foreachDsymbol(Dsymbols* symbols, scope int delegate(Dsymbol) dg)
 }
 
 /***************************************
- * Calls dg(Dsymbol *sym) for each Dsymbol.
+ * Calls dg(Dsymbol* sym) for each Dsymbol.
  * Params:
  *    symbols = Dsymbols
  *    dg = delegate to call for each Dsymbol
@@ -110,22 +108,6 @@ void foreachDsymbol(Dsymbols* symbols, scope void delegate(Dsymbol) dg)
             Dsymbol s = (*symbols)[i];
             dg(s);
         }
-    }
-}
-
-
-struct Ungag
-{
-    uint oldgag;
-
-    extern (D) this(uint old) nothrow @safe
-    {
-        this.oldgag = old;
-    }
-
-    extern (C++) ~this() nothrow
-    {
-        global.gag = oldgag;
     }
 }
 
@@ -265,6 +247,76 @@ private struct DsymbolAttributes
     UserAttributeDeclaration userAttribDecl;
 }
 
+enum DSYM : ubyte
+{
+    none,
+    dsymbol,
+    linkDeclaration,
+    cppMangleDeclaration,
+    alignDeclaration,
+    pragmaDeclaration,
+    conditionalDeclaration,
+    staticForeachDeclaration,
+    userAttributeDeclaration,
+    labelDsymbol,
+    aliasThis,
+    package_,
+    module_,
+    enumMember,
+    templateDeclaration,
+    templateInstance,
+    templateMixin,
+    forwardingAttribDeclaration,
+    nspace,
+    declaration,
+    storageClassDeclaration,
+    expressionDsymbol,
+    aliasAssign,
+    thisDeclaration,
+    bitFieldDeclaration,
+    typeInfoDeclaration,
+    tupleDeclaration,
+    aliasDeclaration,
+    aggregateDeclaration,
+    funcDeclaration,
+    funcAliasDeclaration,
+    overDeclaration,
+    funcLiteralDeclaration,
+    ctorDeclaration,
+    postBlitDeclaration,
+    dtorDeclaration,
+    staticCtorDeclaration,
+    staticDtorDeclaration,
+    sharedStaticCtorDeclaration,
+    sharedStaticDtorDeclaration,
+    invariantDeclaration,
+    unitTestDeclaration,
+    newDeclaration,
+    varDeclaration,
+    versionSymbol,
+    debugSymbol,
+    classDeclaration,
+    structDeclaration,
+    unionDeclaration,
+    interfaceDeclaration,
+    scopeDsymbol,
+    forwardingScopeDsymbol,
+    withScopeSymbol,
+    arrayScopeSymbol,
+    import_,
+    enumDeclaration,
+    symbolDeclaration,
+    attribDeclaration,
+    anonDeclaration,
+    cppNamespaceDeclaration,
+    visibilityDeclaration,
+    overloadSet,
+    mixinDeclaration,
+    staticAssert,
+    staticIfDeclaration,
+    cAsmDeclaration
+}
+
 /***********************************************************
  */
 extern (C++) class Dsymbol : ASTNode
@@ -278,30 +330,42 @@ version (IN_LLVM)
 }
 else
 {
-    Symbol* csym;           // symbol for code generator
+    void* csym;             // symbol for code generator
 }
-    const Loc loc;          // where defined
     Scope* _scope;          // !=null means context to use for semantic()
-    const(char)* prettystring;  // cached value of toPrettyChars()
     private DsymbolAttributes* atts; /// attached attribute declarations
-    bool errors;            // this symbol failed to pass semantic()
-    PASS semanticRun = PASS.initial;
+    const Loc loc;          // where defined
     ushort localNum;        /// perturb mangled name to avoid collisions with those in FuncDeclaration.localsymtab
+    static struct BitFields
+    {
+        bool errors;            // this symbol failed to pass semantic()
+        PASS semanticRun = PASS.initial;
 
-    final extern (D) this() nothrow @safe
+        // Queued for deferred semantics:
+        bool deferred;  // In Module.deferred
+        bool deferred2; // In Module.deferred2
+        bool deferred3; // In Module.deferred3
+    }
+    import dmd.common.bitfields;
+    mixin(generateBitFields!(BitFields, ubyte));
+    DSYM dsym;
+
+    final extern (D) this(DSYM tag) nothrow @safe
     {
         //printf("Dsymbol::Dsymbol(%p)\n", this);
-        loc = Loc(null, 0, 0);
+        this.dsym = tag;
+        loc = Loc.initial;
 version (IN_LLVM)
 {
         this.ir = newIrDsymbol();
 }
     }
 
-    final extern (D) this(Identifier ident) nothrow @safe
+    final extern (D) this(DSYM tag, Identifier ident) nothrow @safe
     {
         //printf("Dsymbol::Dsymbol(%p, ident)\n", this);
-        this.loc = Loc(null, 0, 0);
+        this.dsym = tag;
+        this.loc = Loc.initial;
         this.ident = ident;
 version (IN_LLVM)
 {
@@ -309,9 +373,10 @@ version (IN_LLVM)
 }
     }
 
-    final extern (D) this(const ref Loc loc, Identifier ident) nothrow @safe
+    final extern (D) this(DSYM tag, Loc loc, Identifier ident) nothrow @safe
     {
         //printf("Dsymbol::Dsymbol(%p, ident)\n", this);
+        this.dsym = tag;
         this.loc = loc;
         this.ident = ident;
 version (IN_LLVM)
@@ -331,12 +396,13 @@ version (IN_LLVM)
 
     static Dsymbol create(Identifier ident) nothrow @safe
     {
-        return new Dsymbol(ident);
+        return new Dsymbol(DSYM.dsymbol, ident);
     }
 
-    override const(char)* toChars() const
+    final override const(char)* toChars() const
     {
-        return ident ? ident.toChars() : "__anonymous";
+        import dmd.hdrgen : toChars;
+        return toChars(this);
     }
 
     // Getters / setters for fields stored in `DsymbolAttributes`
@@ -381,34 +447,6 @@ version (IN_LLVM)
         return toChars();
     }
 
-    final const(Loc) getLoc()
-    {
-        if (!loc.isValid()) // avoid bug 5861.
-            if (const m = getModule())
-                return Loc(m.srcfile.toChars(), 0, 0);
-        return loc;
-    }
-
-    final const(char)* locToChars()
-    {
-        return getLoc().toChars();
-    }
-
-    override bool equals(const RootObject o) const
-    {
-        if (this == o)
-            return true;
-        const s = o.isDsymbol();
-        if (!s)
-            return false;
-        // Overload sets don't have an ident
-        // Function-local declarations may have identical names
-        // if they are declared in different scopes
-        if (s && ident && s.ident && ident.equals(s.ident) && localNum == s.localNum)
-            return true;
-        return false;
-    }
-
     final bool isAnonymous() const
     {
         return ident is null || ident.isAnonymous;
@@ -432,8 +470,7 @@ version (IN_LLVM)
         while (s)
         {
             //printf("\ts = %s '%s'\n", s.kind(), s.toPrettyChars());
-            Module m = s.isModule();
-            if (m)
+            if (Module m = s.isModule())
                 return m;
             s = s.parent;
         }
@@ -464,8 +501,7 @@ version (IN_LLVM)
         while (s)
         {
             //printf("\ts = %s '%s'\n", s.kind(), s.toPrettyChars());
-            Module m = s.isModule();
-            if (m)
+            if (Module m = s.isModule())
                 return m;
             TemplateInstance ti = s.isTemplateInstance();
             if (ti && ti.enclosing)
@@ -489,7 +525,7 @@ version (IN_LLVM)
      *
      * See also `parent`, `toParent` and `toParent2`.
      */
-    final inout(Dsymbol) pastMixin() inout
+    final inout(Dsymbol) pastMixin() inout @safe
     {
         //printf("Dsymbol::pastMixin() %s\n", toChars());
         if (!isTemplateMixin() && !isForwardingAttribDeclaration() && !isForwardingScopeDsymbol())
@@ -539,13 +575,13 @@ version (IN_LLVM)
      *  // s.toParentLocal() == FuncDeclaration('mod.test')
      * ---
      */
-    final inout(Dsymbol) toParent() inout
+    final inout(Dsymbol) toParent() inout @safe
     {
         return parent ? parent.pastMixin() : null;
     }
 
     /// ditto
-    final inout(Dsymbol) toParent2() inout
+    final inout(Dsymbol) toParent2() inout @safe
     {
         if (!parent || !parent.isTemplateInstance && !parent.isForwardingAttribDeclaration() && !parent.isForwardingScopeDsymbol())
             return parent;
@@ -575,16 +611,6 @@ version (IN_LLVM)
         return parent.toParentDeclImpl(localOnly);
     }
 
-    /**
-     * Returns the declaration scope scope of `this` unless any of the symbols
-     * `p1` or `p2` resides in its enclosing instantiation scope then the
-     * latter is returned.
-     */
-    final Dsymbol toParentP(Dsymbol p1, Dsymbol p2 = null)
-    {
-        return followInstantiationContext(p1, p2) ? toParent2() : toParentLocal();
-    }
-
     final inout(TemplateInstance) isInstantiated() inout
     {
         if (!parent)
@@ -593,50 +619,6 @@ version (IN_LLVM)
         if (ti && !ti.isTemplateMixin())
             return ti;
         return parent.isInstantiated();
-    }
-
-    /***
-     * Returns true if any of the symbols `p1` or `p2` resides in the enclosing
-     * instantiation scope of `this`.
-     */
-    final bool followInstantiationContext(Dsymbol p1, Dsymbol p2 = null)
-    {
-        static bool has2This(Dsymbol s)
-        {
-            if (auto f = s.isFuncDeclaration())
-                return f.hasDualContext();
-            if (auto ad = s.isAggregateDeclaration())
-                return ad.vthis2 !is null;
-            return false;
-        }
-
-        if (has2This(this))
-        {
-            assert(p1);
-            auto outer = toParent();
-            while (outer)
-            {
-                auto ti = outer.isTemplateInstance();
-                if (!ti)
-                    break;
-                foreach (oarg; *ti.tiargs)
-                {
-                    auto sa = getDsymbol(oarg);
-                    if (!sa)
-                        continue;
-                    sa = sa.toAlias().toParent2();
-                    if (!sa)
-                        continue;
-                    if (sa == p1)
-                        return true;
-                    else if (p2 && sa == p2)
-                        return true;
-                }
-                outer = ti.tempdecl.toParent();
-            }
-            return false;
-        }
-        return false;
     }
 
     // Check if this function is a member of a template which has only been
@@ -653,14 +635,6 @@ version (IN_LLVM)
         if (!parent.toParent())
             return null;
         return parent.isSpeculative();
-    }
-
-    final Ungag ungagSpeculative() const
-    {
-        uint oldgag = global.gag;
-        if (global.gag && !isSpeculative() && !toParent2().isFuncDeclaration())
-            global.gag = 0;
-        return Ungag(oldgag);
     }
 
     // kludge for template.isSymbol()
@@ -693,15 +667,10 @@ version (IN_LLVM)
 
     const(char)* toPrettyChars(bool QualifyTypes = false)
     {
-        if (prettystring && !QualifyTypes)
-            return prettystring; // value cached for speed
-
         //printf("Dsymbol::toPrettyChars() '%s'\n", toChars());
         if (!parent)
         {
             auto s = toChars();
-            if (!QualifyTypes)
-                prettystring = s;
             return s;
         }
 
@@ -721,48 +690,12 @@ version (IN_LLVM)
         addQualifiers(this);
         auto s = buf.extractSlice(true).ptr;
 
-        if (!QualifyTypes)
-            prettystring = s;
         return s;
     }
 
     const(char)* kind() const pure nothrow @nogc @safe
     {
         return "symbol";
-    }
-
-    /*********************************
-     * If this symbol is really an alias for another,
-     * return that other.
-     * If needed, semantic() is invoked due to resolve forward reference.
-     */
-    Dsymbol toAlias()
-    {
-        return this;
-    }
-
-    /*********************************
-     * Resolve recursive tuple expansion in eponymous template.
-     */
-    Dsymbol toAlias2()
-    {
-        return toAlias();
-    }
-
-    bool overloadInsert(Dsymbol s)
-    {
-        //printf("Dsymbol::overloadInsert('%s')\n", s.toChars());
-        return false;
-    }
-
-    /*********************************
-     * Returns:
-     *  SIZE_INVALID when the size cannot be determined
-     */
-    uinteger_t size(const ref Loc loc)
-    {
-        .error(loc, "%s `%s` symbol `%s` has no size", kind, toPrettyChars, toChars());
-        return SIZE_INVALID;
     }
 
     bool isforwardRef()
@@ -848,12 +781,6 @@ version (IN_LLVM)
         return ad ? ad.isClassDeclaration() : null;
     }
 
-    // is this a type?
-    Type getType()
-    {
-        return null;
-    }
-
     // need a 'this' pointer?
     bool needThis()
     {
@@ -878,103 +805,7 @@ version (IN_LLVM)
         assert(0);
     }
 
-    /**************************************
-     * Determine if this symbol is only one.
-     * Returns:
-     *      false, ps = null: There are 2 or more symbols
-     *      true,  ps = null: There are zero symbols
-     *      true,  ps = symbol: The one and only one symbol
-     */
-    bool oneMember(out Dsymbol ps, Identifier ident)
-    {
-        //printf("Dsymbol::oneMember()\n");
-        ps = this;
-        return true;
-    }
-
-    /*****************************************
-     * Same as Dsymbol::oneMember(), but look at an array of Dsymbols.
-     */
-    extern (D) static bool oneMembers(Dsymbols* members, out Dsymbol ps, Identifier ident)
-    {
-        //printf("Dsymbol::oneMembers() %d\n", members ? members.length : 0);
-        Dsymbol s = null;
-        if (!members)
-        {
-            ps = null;
-            return true;
-        }
-
-        for (size_t i = 0; i < members.length; i++)
-        {
-            Dsymbol sx = (*members)[i];
-            bool x = sx.oneMember(ps, ident);
-            //printf("\t[%d] kind %s = %d, s = %p\n", i, sx.kind(), x, *ps);
-            if (!x)
-            {
-                //printf("\tfalse 1\n");
-                assert(ps is null);
-                return false;
-            }
-            if (ps)
-            {
-                assert(ident);
-                if (!ps.ident || !ps.ident.equals(ident))
-                    continue;
-                if (!s)
-                    s = ps;
-                else if (s.isOverloadable() && ps.isOverloadable())
-                {
-                    // keep head of overload set
-                    FuncDeclaration f1 = s.isFuncDeclaration();
-                    FuncDeclaration f2 = ps.isFuncDeclaration();
-                    if (f1 && f2)
-                    {
-                        assert(!f1.isFuncAliasDeclaration());
-                        assert(!f2.isFuncAliasDeclaration());
-                        for (; f1 != f2; f1 = f1.overnext0)
-                        {
-                            if (f1.overnext0 is null)
-                            {
-                                f1.overnext0 = f2;
-                                break;
-                            }
-                        }
-                    }
-                }
-                else // more than one symbol
-                {
-                    ps = null;
-                    //printf("\tfalse 2\n");
-                    return false;
-                }
-            }
-        }
-        ps = s; // s is the one symbol, null if none
-        //printf("\ttrue\n");
-        return true;
-    }
-
-    /*****************************************
-     * Is Dsymbol a variable that contains pointers?
-     */
-    bool hasPointers()
-    {
-        //printf("Dsymbol::hasPointers() %s\n", toChars());
-        return false;
-    }
-
-    bool hasStaticCtorOrDtor()
-    {
-        //printf("Dsymbol::hasStaticCtorOrDtor() %s\n", toChars());
-        return false;
-    }
-
     void addObjcSymbols(ClassDeclarations* classes, ClassDeclarations* categories)
-    {
-    }
-
-    void checkCtorConstInit()
     {
     }
 
@@ -984,22 +815,8 @@ version (IN_LLVM)
      */
     void addComment(const(char)* comment)
     {
-        if (!comment || !*comment)
-            return;
-
-        //printf("addComment '%s' to Dsymbol %p '%s'\n", comment, this, toChars());
-        void* h = cast(void*)this;      // just the pointer is the key
-        auto p = h in commentHashTable;
-        if (!p)
-        {
-            commentHashTable[h] = comment;
-            return;
-        }
-        if (strcmp(*p, comment) != 0)
-        {
-            // Concatenate the two
-            *p = Lexer.combineComments((*p).toDString(), comment.toDString(), true);
-        }
+        import dmd.dsymbolsem;
+        dmd.dsymbolsem.addComment(this, comment);
     }
 
     /// get documentation comment for this Dsymbol
@@ -1017,7 +834,7 @@ version (IN_LLVM)
     /* Shell around addComment() to avoid disruption for the moment */
     final void comment(const(char)* comment) { addComment(comment); }
 
-    private extern (D) __gshared const(char)*[void*] commentHashTable;
+    extern (D) __gshared const(char)*[void*] commentHashTable;
 
 
     /**********************************
@@ -1084,63 +901,182 @@ version (IN_LLVM)
         v.visit(this);
     }
 
-  pure nothrow @safe @nogc:
+  pure nothrow @trusted @nogc final:
 
-    // Eliminate need for dynamic_cast
-    inout(Package)                     isPackage()                     inout { return null; }
-    inout(Module)                      isModule()                      inout { return null; }
-    inout(EnumMember)                  isEnumMember()                  inout { return null; }
-    inout(TemplateDeclaration)         isTemplateDeclaration()         inout { return null; }
-    inout(TemplateInstance)            isTemplateInstance()            inout { return null; }
-    inout(TemplateMixin)               isTemplateMixin()               inout { return null; }
-    inout(ForwardingAttribDeclaration) isForwardingAttribDeclaration() inout { return null; }
-    inout(Nspace)                      isNspace()                      inout { return null; }
-    inout(Declaration)                 isDeclaration()                 inout { return null; }
-    inout(StorageClassDeclaration)     isStorageClassDeclaration()     inout { return null; }
-    inout(ExpressionDsymbol)           isExpressionDsymbol()           inout { return null; }
-    inout(AliasAssign)                 isAliasAssign()                 inout { return null; }
-    inout(ThisDeclaration)             isThisDeclaration()             inout { return null; }
-    inout(BitFieldDeclaration)         isBitFieldDeclaration()         inout { return null; }
-    inout(TypeInfoDeclaration)         isTypeInfoDeclaration()         inout { return null; }
-    inout(TupleDeclaration)            isTupleDeclaration()            inout { return null; }
-    inout(AliasDeclaration)            isAliasDeclaration()            inout { return null; }
-    inout(AggregateDeclaration)        isAggregateDeclaration()        inout { return null; }
-    inout(FuncDeclaration)             isFuncDeclaration()             inout { return null; }
-    inout(FuncAliasDeclaration)        isFuncAliasDeclaration()        inout { return null; }
-    inout(OverDeclaration)             isOverDeclaration()             inout { return null; }
-    inout(FuncLiteralDeclaration)      isFuncLiteralDeclaration()      inout { return null; }
-    inout(CtorDeclaration)             isCtorDeclaration()             inout { return null; }
-    inout(PostBlitDeclaration)         isPostBlitDeclaration()         inout { return null; }
-    inout(DtorDeclaration)             isDtorDeclaration()             inout { return null; }
-    inout(StaticCtorDeclaration)       isStaticCtorDeclaration()       inout { return null; }
-    inout(StaticDtorDeclaration)       isStaticDtorDeclaration()       inout { return null; }
-    inout(SharedStaticCtorDeclaration) isSharedStaticCtorDeclaration() inout { return null; }
-    inout(SharedStaticDtorDeclaration) isSharedStaticDtorDeclaration() inout { return null; }
-    inout(InvariantDeclaration)        isInvariantDeclaration()        inout { return null; }
-    inout(UnitTestDeclaration)         isUnitTestDeclaration()         inout { return null; }
-    inout(NewDeclaration)              isNewDeclaration()              inout { return null; }
-    inout(VarDeclaration)              isVarDeclaration()              inout { return null; }
-    inout(VersionSymbol)               isVersionSymbol()               inout { return null; }
-    inout(DebugSymbol)                 isDebugSymbol()                 inout { return null; }
-    inout(ClassDeclaration)            isClassDeclaration()            inout { return null; }
-    inout(StructDeclaration)           isStructDeclaration()           inout { return null; }
-    inout(UnionDeclaration)            isUnionDeclaration()            inout { return null; }
-    inout(InterfaceDeclaration)        isInterfaceDeclaration()        inout { return null; }
-    inout(ScopeDsymbol)                isScopeDsymbol()                inout { return null; }
-    inout(ForwardingScopeDsymbol)      isForwardingScopeDsymbol()      inout { return null; }
-    inout(WithScopeSymbol)             isWithScopeSymbol()             inout { return null; }
-    inout(ArrayScopeSymbol)            isArrayScopeSymbol()            inout { return null; }
-    inout(Import)                      isImport()                      inout { return null; }
-    inout(EnumDeclaration)             isEnumDeclaration()             inout { return null; }
-    inout(SymbolDeclaration)           isSymbolDeclaration()           inout { return null; }
-    inout(AttribDeclaration)           isAttribDeclaration()           inout { return null; }
-    inout(AnonDeclaration)             isAnonDeclaration()             inout { return null; }
-    inout(CPPNamespaceDeclaration)     isCPPNamespaceDeclaration()     inout { return null; }
-    inout(VisibilityDeclaration)       isVisibilityDeclaration()       inout { return null; }
-    inout(OverloadSet)                 isOverloadSet()                 inout { return null; }
-    inout(MixinDeclaration)            isMixinDeclaration()            inout { return null; }
-    inout(StaticAssert)                isStaticAssert()                inout { return null; }
-    inout(StaticIfDeclaration)         isStaticIfDeclaration()         inout { return null; }
+    inout(Package)                     isPackage()                     inout { return (dsym == DSYM.package_ || dsym == DSYM.module_) ? cast(inout(Package)) cast(void*) this : null; }
+    inout(Module)                      isModule()                      inout { return dsym == DSYM.module_ ? cast(inout(Module)) cast(void*) this : null; }
+    inout(EnumMember)                  isEnumMember()                  inout { return dsym == DSYM.enumMember ? cast(inout(EnumMember)) cast(void*) this : null; }
+    inout(TemplateDeclaration)         isTemplateDeclaration()         inout { return dsym == DSYM.templateDeclaration ? cast(inout(TemplateDeclaration)) cast(void*) this : null; }
+    inout(TemplateInstance)            isTemplateInstance()            inout { return (dsym == DSYM.templateInstance || dsym == DSYM.templateMixin) ? cast(inout(TemplateInstance)) cast(void*) this : null; }
+    inout(TemplateMixin)               isTemplateMixin()               inout { return dsym == DSYM.templateMixin ? cast(inout(TemplateMixin)) cast(void*) this : null; }
+    inout(ForwardingAttribDeclaration) isForwardingAttribDeclaration() inout { return dsym == DSYM.forwardingAttribDeclaration ? cast(inout(ForwardingAttribDeclaration)) cast(void*) this : null; }
+    inout(Nspace)                      isNspace()                      inout { return dsym == DSYM.nspace ? cast(inout(Nspace)) cast(void*) this : null; }
+    inout(Declaration)                 isDeclaration()                 inout {
+        switch (dsym)
+        {
+        case DSYM.tupleDeclaration:
+        case DSYM.aliasDeclaration:
+        case DSYM.overDeclaration:
+        case DSYM.varDeclaration:
+            case DSYM.bitFieldDeclaration:
+            case DSYM.typeInfoDeclaration:
+            case DSYM.thisDeclaration:
+            case DSYM.enumMember:
+        case DSYM.symbolDeclaration:
+        case DSYM.funcDeclaration:
+            case DSYM.funcAliasDeclaration:
+            case DSYM.funcLiteralDeclaration:
+            case DSYM.ctorDeclaration:
+            case DSYM.postBlitDeclaration:
+            case DSYM.dtorDeclaration:
+            case DSYM.staticCtorDeclaration:
+                case DSYM.sharedStaticCtorDeclaration:
+            case DSYM.staticDtorDeclaration:
+                case DSYM.sharedStaticDtorDeclaration:
+            case DSYM.invariantDeclaration:
+            case DSYM.unitTestDeclaration:
+            case DSYM.newDeclaration:
+            return cast(inout(Declaration)) cast(void*) this;
+        default:
+            return null;
+        }
+    }
+    inout(StorageClassDeclaration)     isStorageClassDeclaration()     inout { return dsym == DSYM.storageClassDeclaration ? cast(inout(StorageClassDeclaration)) cast(void*) this : null; }
+    inout(ExpressionDsymbol)           isExpressionDsymbol()           inout { return dsym == DSYM.expressionDsymbol ? cast(inout(ExpressionDsymbol)) cast(void*) this : null; }
+    inout(AliasAssign)                 isAliasAssign()                 inout { return dsym == DSYM.aliasAssign ? cast(inout(AliasAssign)) cast(void*) this : null; }
+    inout(ThisDeclaration)             isThisDeclaration()             inout { return dsym == DSYM.thisDeclaration ? cast(inout(ThisDeclaration)) cast(void*) this : null; }
+    inout(BitFieldDeclaration)         isBitFieldDeclaration()         inout { return dsym == DSYM.bitFieldDeclaration ? cast(inout(BitFieldDeclaration)) cast(void*) this : null; }
+    inout(TypeInfoDeclaration)         isTypeInfoDeclaration()         inout { return dsym == DSYM.typeInfoDeclaration ? cast(inout(TypeInfoDeclaration)) cast(void*) this : null; }
+    inout(TupleDeclaration)            isTupleDeclaration()            inout { return dsym == DSYM.tupleDeclaration ? cast(inout(TupleDeclaration)) cast(void*) this : null; }
+    inout(AliasDeclaration)            isAliasDeclaration()            inout { return dsym == DSYM.aliasDeclaration ? cast(inout(AliasDeclaration)) cast(void*) this : null; }
+    inout(AggregateDeclaration)        isAggregateDeclaration()        inout {
+        switch (dsym)
+        {
+        case DSYM.aggregateDeclaration:
+        case DSYM.structDeclaration:
+        case DSYM.unionDeclaration:
+        case DSYM.classDeclaration:
+        case DSYM.interfaceDeclaration:
+            return cast(inout(AggregateDeclaration)) cast(void*) this;
+        default:
+            return null;
+        }
+    }
+    inout(FuncDeclaration)             isFuncDeclaration()             inout {
+        switch (dsym)
+        {
+        case DSYM.funcDeclaration:
+            case DSYM.funcAliasDeclaration:
+            case DSYM.funcLiteralDeclaration:
+            case DSYM.ctorDeclaration:
+            case DSYM.postBlitDeclaration:
+            case DSYM.dtorDeclaration:
+            case DSYM.staticCtorDeclaration:
+                case DSYM.sharedStaticCtorDeclaration:
+            case DSYM.staticDtorDeclaration:
+                case DSYM.sharedStaticDtorDeclaration:
+            case DSYM.invariantDeclaration:
+            case DSYM.unitTestDeclaration:
+            case DSYM.newDeclaration:
+            return cast(inout(FuncDeclaration)) cast(void*) this;
+        default:
+            return null;
+        }
+    }
+    inout(FuncAliasDeclaration)        isFuncAliasDeclaration()        inout { return dsym == DSYM.funcAliasDeclaration ? cast(inout(FuncAliasDeclaration)) cast(void*) this : null; }
+    inout(OverDeclaration)             isOverDeclaration()             inout { return dsym == DSYM.overDeclaration ? cast(inout(OverDeclaration)) cast(void*) this : null; }
+    inout(FuncLiteralDeclaration)      isFuncLiteralDeclaration()      inout { return dsym == DSYM.funcLiteralDeclaration ? cast(inout(FuncLiteralDeclaration)) cast(void*) this : null; }
+    inout(CtorDeclaration)             isCtorDeclaration()             inout { return dsym == DSYM.ctorDeclaration ? cast(inout(CtorDeclaration)) cast(void*) this : null; }
+    inout(PostBlitDeclaration)         isPostBlitDeclaration()         inout { return dsym == DSYM.postBlitDeclaration ? cast(inout(PostBlitDeclaration)) cast(void*) this : null; }
+    inout(DtorDeclaration)             isDtorDeclaration()             inout { return dsym == DSYM.dtorDeclaration ? cast(inout(DtorDeclaration)) cast(void*) this : null; }
+    inout(StaticCtorDeclaration)       isStaticCtorDeclaration()       inout { return (dsym == DSYM.staticCtorDeclaration || dsym == DSYM.sharedStaticCtorDeclaration) ? cast(inout(StaticCtorDeclaration)) cast(void*) this : null; }
+    inout(StaticDtorDeclaration)       isStaticDtorDeclaration()       inout { return (dsym == DSYM.staticDtorDeclaration || dsym == DSYM.sharedStaticDtorDeclaration) ? cast(inout(StaticDtorDeclaration)) cast(void*) this : null; }
+    inout(SharedStaticCtorDeclaration) isSharedStaticCtorDeclaration() inout { return dsym == DSYM.sharedStaticCtorDeclaration ? cast(inout(SharedStaticCtorDeclaration)) cast(void*) this : null; }
+    inout(SharedStaticDtorDeclaration) isSharedStaticDtorDeclaration() inout { return dsym == DSYM.sharedStaticDtorDeclaration ? cast(inout(SharedStaticDtorDeclaration)) cast(void*) this : null; }
+    inout(InvariantDeclaration)        isInvariantDeclaration()        inout { return dsym == DSYM.invariantDeclaration ? cast(inout(InvariantDeclaration)) cast(void*) this : null; }
+    inout(UnitTestDeclaration)         isUnitTestDeclaration()         inout { return dsym == DSYM.unitTestDeclaration ? cast(inout(UnitTestDeclaration)) cast(void*) this : null; }
+    inout(NewDeclaration)              isNewDeclaration()              inout { return dsym == DSYM.newDeclaration ? cast(inout(NewDeclaration)) cast(void*) this : null; }
+    inout(VarDeclaration)              isVarDeclaration()              inout {
+        switch (dsym)
+        {
+        case DSYM.varDeclaration:
+            case DSYM.bitFieldDeclaration:
+            case DSYM.typeInfoDeclaration:
+            case DSYM.thisDeclaration:
+            case DSYM.enumMember:
+            return cast(inout(VarDeclaration)) cast(void*) this;
+        default:
+            return null;
+        }
+    }
+    inout(VersionSymbol)               isVersionSymbol()               inout { return dsym == DSYM.versionSymbol ? cast(inout(VersionSymbol)) cast(void*) this : null; }
+    inout(DebugSymbol)                 isDebugSymbol()                 inout { return dsym == DSYM.debugSymbol ? cast(inout(DebugSymbol)) cast(void*) this : null; }
+    inout(ClassDeclaration)            isClassDeclaration()            inout { return (dsym == DSYM.classDeclaration || dsym == DSYM.interfaceDeclaration) ? cast(inout(ClassDeclaration)) cast(void*) this : null; }
+    inout(StructDeclaration)           isStructDeclaration()           inout { return (dsym == DSYM.structDeclaration || dsym == DSYM.unionDeclaration) ? cast(inout(StructDeclaration)) cast(void*) this : null; }
+    inout(UnionDeclaration)            isUnionDeclaration()            inout { return dsym == DSYM.unionDeclaration ? cast(inout(UnionDeclaration)) cast(void*) this : null; }
+    inout(InterfaceDeclaration)        isInterfaceDeclaration()        inout { return dsym == DSYM.interfaceDeclaration ? cast(inout(InterfaceDeclaration)) cast(void*) this : null; }
+    inout(ScopeDsymbol)                isScopeDsymbol()                inout {
+        switch (dsym)
+        {
+        case DSYM.enumDeclaration:
+        case DSYM.scopeDsymbol:
+        case DSYM.package_:
+            case DSYM.module_:
+        case DSYM.nspace:
+        case DSYM.templateInstance:
+            case DSYM.templateMixin:
+        case DSYM.templateDeclaration:
+        case DSYM.aggregateDeclaration:
+            case DSYM.structDeclaration:
+                case DSYM.unionDeclaration:
+            case DSYM.classDeclaration:
+                case DSYM.interfaceDeclaration:
+        case DSYM.withScopeSymbol:
+        case DSYM.arrayScopeSymbol:
+        case DSYM.forwardingScopeDsymbol:
+            return cast(inout(ScopeDsymbol)) cast(void*) this;
+        default:
+            return null;
+        }
+    }
+    inout(ForwardingScopeDsymbol)      isForwardingScopeDsymbol()      inout { return dsym == DSYM.forwardingScopeDsymbol ? cast(inout(ForwardingScopeDsymbol)) cast(void*) this : null; }
+    inout(WithScopeSymbol)             isWithScopeSymbol()             inout { return dsym == DSYM.withScopeSymbol ? cast(inout(WithScopeSymbol)) cast(void*) this : null; }
+    inout(ArrayScopeSymbol)            isArrayScopeSymbol()            inout { return dsym == DSYM.arrayScopeSymbol ? cast(inout(ArrayScopeSymbol)) cast(void*) this : null; }
+    inout(Import)                      isImport()                      inout { return dsym == DSYM.import_ ? cast(inout(Import)) cast(void*) this : null; }
+    inout(EnumDeclaration)             isEnumDeclaration()             inout { return dsym == DSYM.enumDeclaration ? cast(inout(EnumDeclaration)) cast(void*) this : null; }
+    inout(SymbolDeclaration)           isSymbolDeclaration()           inout { return dsym == DSYM.symbolDeclaration ? cast(inout(SymbolDeclaration)) cast(void*) this : null; }
+    inout(AttribDeclaration)           isAttribDeclaration()           inout {
+        switch (dsym)
+        {
+        case DSYM.attribDeclaration:
+        case DSYM.storageClassDeclaration:
+        case DSYM.linkDeclaration:
+        case DSYM.cppMangleDeclaration:
+        case DSYM.cppNamespaceDeclaration:
+        case DSYM.visibilityDeclaration:
+        case DSYM.alignDeclaration:
+        case DSYM.anonDeclaration:
+        case DSYM.pragmaDeclaration:
+        case DSYM.conditionalDeclaration:
+            case DSYM.staticIfDeclaration:
+        case DSYM.staticForeachDeclaration:
+        case DSYM.forwardingAttribDeclaration:
+        case DSYM.mixinDeclaration:
+        case DSYM.userAttributeDeclaration:
+            return cast(inout(AttribDeclaration)) cast(void*) this;
+        default:
+            return null;
+        }
+    }
+    inout(AlignDeclaration)            isAlignDeclaration()            inout { return dsym == DSYM.alignDeclaration ? cast(inout(AlignDeclaration)) cast(void*) this : null; }
+    inout(AnonDeclaration)             isAnonDeclaration()             inout { return dsym == DSYM.anonDeclaration ? cast(inout(AnonDeclaration)) cast(void*) this : null; }
+    inout(CPPNamespaceDeclaration)     isCPPNamespaceDeclaration()     inout { return dsym == DSYM.cppNamespaceDeclaration ? cast(inout(CPPNamespaceDeclaration)) cast(void*) this : null; }
+    inout(VisibilityDeclaration)       isVisibilityDeclaration()       inout { return dsym == DSYM.visibilityDeclaration ? cast(inout(VisibilityDeclaration)) cast(void*) this : null; }
+    inout(OverloadSet)                 isOverloadSet()                 inout { return dsym == DSYM.overloadSet ? cast(inout(OverloadSet)) cast(void*) this : null; }
+    inout(MixinDeclaration)            isMixinDeclaration()            inout { return dsym == DSYM.mixinDeclaration ? cast(inout(MixinDeclaration)) cast(void*) this : null; }
+    inout(StaticAssert)                isStaticAssert()                inout { return dsym == DSYM.staticAssert ? cast(inout(StaticAssert)) cast(void*) this : null; }
+    inout(StaticIfDeclaration)         isStaticIfDeclaration()         inout { return dsym == DSYM.staticIfDeclaration ? cast(inout(StaticIfDeclaration)) cast(void*) this : null; }
+    inout(CAsmDeclaration)             isCAsmDeclaration()             inout { return dsym == DSYM.cAsmDeclaration ? cast(inout(CAsmDeclaration)) cast(void*) this : null; }
 }
 
 /***********************************************************
@@ -1163,16 +1099,17 @@ private:
 public:
     final extern (D) this() nothrow @safe
     {
+        super(DSYM.scopeDsymbol);
     }
 
     final extern (D) this(Identifier ident) nothrow @safe
     {
-        super(ident);
+        super(DSYM.scopeDsymbol, ident);
     }
 
-    final extern (D) this(const ref Loc loc, Identifier ident) nothrow @safe
+    final extern (D) this(Loc loc, Identifier ident) nothrow @safe
     {
-        super(loc, ident);
+        super(DSYM.scopeDsymbol, loc, ident);
     }
 
     override ScopeDsymbol syntaxCopy(Dsymbol s)
@@ -1183,52 +1120,6 @@ public:
         sds.members = arraySyntaxCopy(members);
         sds.endlinnum = endlinnum;
         return sds;
-    }
-
-    extern (D) final OverloadSet mergeOverloadSet(Identifier ident, OverloadSet os, Dsymbol s)
-    {
-        if (!os)
-        {
-            os = new OverloadSet(ident);
-            os.parent = this;
-        }
-        if (OverloadSet os2 = s.isOverloadSet())
-        {
-            // Merge the cross-module overload set 'os2' into 'os'
-            if (os.a.length == 0)
-            {
-                os.a.setDim(os2.a.length);
-                memcpy(os.a.tdata(), os2.a.tdata(), (os.a[0]).sizeof * os2.a.length);
-            }
-            else
-            {
-                for (size_t i = 0; i < os2.a.length; i++)
-                {
-                    os = mergeOverloadSet(ident, os, os2.a[i]);
-                }
-            }
-        }
-        else
-        {
-            assert(s.isOverloadable());
-            /* Don't add to os[] if s is alias of previous sym
-             */
-            for (size_t j = 0; j < os.a.length; j++)
-            {
-                Dsymbol s2 = os.a[j];
-                if (s.toAlias() == s2.toAlias())
-                {
-                    if (s2.isDeprecated() || (s2.visible() < s.visible() && s.visible().kind != Visibility.Kind.none))
-                    {
-                        os.a[j] = s;
-                    }
-                    goto Lcontinue;
-                }
-            }
-            os.push(s);
-        Lcontinue:
-        }
-        return os;
     }
 
     void importScope(Dsymbol s, Visibility visibility) nothrow
@@ -1312,7 +1203,7 @@ public:
         return (members is null);
     }
 
-    static void multiplyDefined(const ref Loc loc, Dsymbol s1, Dsymbol s2)
+    static void multiplyDefined(Loc loc, Dsymbol s1, Dsymbol s2)
     {
         version (none)
         {
@@ -1348,7 +1239,7 @@ public:
         }
         else
         {
-            .error(s1.loc, "%s `%s` conflicts with %s `%s` at %s", s1.kind, s1.toPrettyChars, s2.kind(), s2.toPrettyChars(), s2.locToChars());
+            .error(s1.loc, "%s `%s` conflicts with %s `%s` at %s", s1.kind, s1.toPrettyChars, s2.kind(), s2.toPrettyChars(), s2.loc.toChars());
         }
     }
 
@@ -1382,29 +1273,6 @@ public:
         return symtab.lookup(id);
     }
 
-    /****************************************
-     * Return true if any of the members are static ctors or static dtors, or if
-     * any members have members that are.
-     */
-    override bool hasStaticCtorOrDtor()
-    {
-        if (members)
-        {
-            for (size_t i = 0; i < members.length; i++)
-            {
-                Dsymbol member = (*members)[i];
-                if (member.hasStaticCtorOrDtor())
-                    return true;
-            }
-        }
-        return false;
-    }
-
-    override final inout(ScopeDsymbol) isScopeDsymbol() inout
-    {
-        return this;
-    }
-
     override void accept(Visitor v)
     {
         v.visit(this);
@@ -1421,11 +1289,7 @@ extern (C++) final class WithScopeSymbol : ScopeDsymbol
     extern (D) this(WithStatement withstate) nothrow @safe
     {
         this.withstate = withstate;
-    }
-
-    override inout(WithScopeSymbol) isWithScopeSymbol() inout
-    {
-        return this;
+        this.dsym = DSYM.withScopeSymbol;
     }
 
     override void accept(Visitor v)
@@ -1449,6 +1313,7 @@ extern (C++) final class ArrayScopeSymbol : ScopeDsymbol
         assert(exp.op == EXP.index || exp.op == EXP.slice || exp.op == EXP.array);
         this._scope = sc;
         this.arrayContent = exp;
+        this.dsym = DSYM.arrayScopeSymbol;
     }
 
     extern (D) this(Scope* sc, TypeTuple type) nothrow @safe
@@ -1461,11 +1326,6 @@ extern (C++) final class ArrayScopeSymbol : ScopeDsymbol
     {
         this._scope = sc;
         this.arrayContent = td;
-    }
-
-    override inout(ArrayScopeSymbol) isArrayScopeSymbol() inout
-    {
-        return this;
     }
 
     override void accept(Visitor v)
@@ -1483,7 +1343,7 @@ extern (C++) final class OverloadSet : Dsymbol
 
     extern (D) this(Identifier ident, OverloadSet os = null) nothrow
     {
-        super(ident);
+        super(DSYM.overloadSet, ident);
         if (os)
         {
             a.pushSlice(os.a[]);
@@ -1493,11 +1353,6 @@ extern (C++) final class OverloadSet : Dsymbol
     void push(Dsymbol s) nothrow
     {
         a.push(s);
-    }
-
-    override inout(OverloadSet) isOverloadSet() inout
-    {
-        return this;
     }
 
     override const(char)* kind() const
@@ -1522,6 +1377,7 @@ extern (C++) final class ForwardingScopeDsymbol : ScopeDsymbol
     extern (D) this() nothrow @safe
     {
         super();
+        this.dsym = DSYM.forwardingScopeDsymbol;
     }
 
     override Dsymbol symtabInsert(Dsymbol s) nothrow
@@ -1590,11 +1446,6 @@ extern (C++) final class ForwardingScopeDsymbol : ScopeDsymbol
 
     override const(char)* kind()const{ return "local scope"; }
 
-    override inout(ForwardingScopeDsymbol) isForwardingScopeDsymbol() inout nothrow
-    {
-        return this;
-    }
-
 }
 
 /**
@@ -1607,13 +1458,8 @@ extern (C++) final class ExpressionDsymbol : Dsymbol
     Expression exp;
     this(Expression exp) nothrow @safe
     {
-        super();
+        super(DSYM.expressionDsymbol);
         this.exp = exp;
-    }
-
-    override inout(ExpressionDsymbol) isExpressionDsymbol() inout nothrow
-    {
-        return this;
     }
 }
 
@@ -1630,9 +1476,9 @@ extern (C++) final class AliasAssign : Dsymbol
     Dsymbol aliassym; /// replace previous RHS of AliasDeclaration with `aliassym`
                       /// only one of type and aliassym can be != null
 
-    extern (D) this(const ref Loc loc, Identifier ident, Type type, Dsymbol aliassym) nothrow @safe
+    extern (D) this(Loc loc, Identifier ident, Type type, Dsymbol aliassym) nothrow @safe
     {
-        super(loc, null);
+        super(DSYM.aliasAssign, loc, null);
         this.ident = ident;
         this.type = type;
         this.aliassym = aliassym;
@@ -1645,11 +1491,6 @@ extern (C++) final class AliasAssign : Dsymbol
                 type     ? type.syntaxCopy()         : null,
                 aliassym ? aliassym.syntaxCopy(null) : null);
         return aa;
-    }
-
-    override inout(AliasAssign) isAliasAssign() inout
-    {
-        return this;
     }
 
     override const(char)* kind() const
@@ -1736,275 +1577,20 @@ extern (C++) final class DsymbolTable : RootObject
     }
 }
 
-/**********************************************
- * ImportC tag symbols sit in a parallel symbol table,
- * so that this C code works:
- * ---
- * struct S { a; };
- * int S;
- * struct S s;
- * ---
- * But there are relatively few such tag symbols, so that would be
- * a waste of memory and complexity. An additional problem is we'd like the D side
- * to find the tag symbols with ordinary lookup, not lookup in both
- * tables, if the tag symbol is not conflicting with an ordinary symbol.
- * The solution is to put the tag symbols that conflict into an associative
- * array, indexed by the address of the ordinary symbol that conflicts with it.
- * C has no modules, so this associative array is tagSymTab[] in ModuleDeclaration.
- * A side effect of our approach is that D code cannot access a tag symbol that is
- * hidden by an ordinary symbol. This is more of a theoretical problem, as nobody
- * has mentioned it when importing C headers. If someone wants to do it,
- * too bad so sad. Change the C code.
- * This function fixes up the symbol table when faced with adding a new symbol
- * `s` when there is an existing symbol `s2` with the same name.
- * C also allows forward and prototype declarations of tag symbols,
- * this function merges those.
- * Params:
- *      sc = context
- *      s = symbol to add to symbol table
- *      s2 = existing declaration
- *      sds = symbol table
- * Returns:
- *      if s and s2 are successfully put in symbol table then return the merged symbol,
- *      null if they conflict
+/**
+ * ImportC global `asm` definition.
  */
-Dsymbol handleTagSymbols(ref Scope sc, Dsymbol s, Dsymbol s2, ScopeDsymbol sds)
+extern (C++) final class CAsmDeclaration : Dsymbol
 {
-    enum log = false;
-    if (log) printf("handleTagSymbols('%s') add %p existing %p\n", s.toChars(), s, s2);
-    if (log) printf("  add %s %s, existing %s %s\n", s.kind(), s.toChars(), s2.kind(), s2.toChars());
-    auto sd = s.isScopeDsymbol(); // new declaration
-    auto sd2 = s2.isScopeDsymbol(); // existing declaration
-
-    static if (log) void print(EnumDeclaration sd)
+    Expression code;
+    extern (D) this(Expression e) nothrow @safe
     {
-        printf("members: %p\n", sd.members);
-        printf("symtab: %p\n", sd.symtab);
-        printf("endlinnum: %d\n", sd.endlinnum);
-        printf("type: %s\n", sd.type.toChars());
-        printf("memtype: %s\n", sd.memtype.toChars());
+        super(DSYM.cAsmDeclaration);
+        this.code = e;
     }
 
-    if (!sd2)
+    override void accept(Visitor v)
     {
-        /* Look in tag table
-         */
-        if (log) printf(" look in tag table\n");
-        if (auto p = cast(void*)s2 in sc._module.tagSymTab)
-        {
-            Dsymbol s2tag = *p;
-            sd2 = s2tag.isScopeDsymbol();
-            assert(sd2);        // only tags allowed in tag symbol table
-        }
+        v.visit(this);
     }
-
-    if (sd && sd2) // `s` is a tag, `sd2` is the same tag
-    {
-        if (log) printf(" tag is already defined\n");
-
-        if (sd.kind() != sd2.kind())  // being enum/struct/union must match
-            return null;              // conflict
-
-        /* Not a redeclaration if one is a forward declaration.
-         * Move members to the first declared type, which is sd2.
-         */
-        if (sd2.members)
-        {
-            if (!sd.members)
-                return sd2;  // ignore the sd redeclaration
-        }
-        else if (sd.members)
-        {
-            sd2.members = sd.members; // transfer definition to sd2
-            sd.members = null;
-            if (auto ed2 = sd2.isEnumDeclaration())
-            {
-                auto ed = sd.isEnumDeclaration();
-                if (ed.memtype != ed2.memtype)
-                    return null;        // conflict
-
-                // transfer ed's members to sd2
-                ed2.members.foreachDsymbol( (s)
-                {
-                    if (auto em = s.isEnumMember())
-                        em.ed = ed2;
-                });
-
-                ed2.type = ed.type;
-                ed2.memtype = ed.memtype;
-                ed2.added = false;
-            }
-            return sd2;
-        }
-        else
-            return sd2; // ignore redeclaration
-    }
-    else if (sd) // `s` is a tag, `s2` is not
-    {
-        if (log) printf(" s is tag, s2 is not\n");
-        /* add `s` as tag indexed by s2
-         */
-        sc._module.tagSymTab[cast(void*)s2] = s;
-        return s;
-    }
-    else if (s2 is sd2) // `s2` is a tag, `s` is not
-    {
-        if (log) printf(" s2 is tag, s is not\n");
-        /* replace `s2` in symbol table with `s`,
-         * then add `s2` as tag indexed by `s`
-         */
-        sds.symtab.update(s);
-        sc._module.tagSymTab[cast(void*)s] = s2;
-        return s;
-    }
-    // neither s2 nor s is a tag
-    if (log) printf(" collision\n");
-    return null;
-}
-
-
-/**********************************************
- * ImportC allows redeclarations of C variables, functions and typedefs.
- *    extern int x;
- *    int x = 3;
- * and:
- *    extern void f();
- *    void f() { }
- * Attempt to merge them.
- * Params:
- *      sc = context
- *      s = symbol to add to symbol table
- *      s2 = existing declaration
- *      sds = symbol table
- * Returns:
- *      if s and s2 are successfully put in symbol table then return the merged symbol,
- *      null if they conflict
- */
-Dsymbol handleSymbolRedeclarations(ref Scope sc, Dsymbol s, Dsymbol s2, ScopeDsymbol sds)
-{
-    enum log = false;
-    if (log) printf("handleSymbolRedeclarations('%s')\n", s.toChars());
-    if (log) printf("  add %s %s, existing %s %s\n", s.kind(), s.toChars(), s2.kind(), s2.toChars());
-
-    static Dsymbol collision()
-    {
-        if (log) printf(" collision\n");
-        return null;
-    }
-    /*
-    Handle merging declarations with asm("foo") and their definitions
-    */
-    static void mangleWrangle(Declaration oldDecl, Declaration newDecl)
-    {
-        if (oldDecl && newDecl)
-        {
-            newDecl.mangleOverride = oldDecl.mangleOverride ? oldDecl.mangleOverride : null;
-        }
-    }
-
-    auto vd = s.isVarDeclaration(); // new declaration
-    auto vd2 = s2.isVarDeclaration(); // existing declaration
-
-    if (vd && vd.isCmacro())
-        return vd2;
-
-    assert(!(vd2 && vd2.isCmacro()));
-
-    if (vd && vd2)
-    {
-        /* if one is `static` and the other isn't, the result is undefined
-         * behavior, C11 6.2.2.7
-         */
-        if ((vd.storage_class ^ vd2.storage_class) & STC.static_)
-            return collision();
-
-        const i1 =  vd._init && ! vd._init.isVoidInitializer();
-        const i2 = vd2._init && !vd2._init.isVoidInitializer();
-
-        if (i1 && i2)
-            return collision();         // can't both have initializers
-
-        mangleWrangle(vd2, vd);
-
-        if (i1)                         // vd is the definition
-        {
-            vd2.storage_class |= STC.extern_;  // so toObjFile() won't emit it
-            sds.symtab.update(vd);      // replace vd2 with the definition
-            return vd;
-        }
-
-        /* BUG: the types should match, which needs semantic() to be run on it
-         *    extern int x;
-         *    int x;  // match
-         *    typedef int INT;
-         *    INT x;  // match
-         *    long x; // collision
-         * We incorrectly ignore these collisions
-         */
-        return vd2;
-    }
-
-    auto fd = s.isFuncDeclaration(); // new declaration
-    auto fd2 = s2.isFuncDeclaration(); // existing declaration
-    if (fd && fd2)
-    {
-        /* if one is `static` and the other isn't, the result is undefined
-         * behavior, C11 6.2.2.7
-         * However, match what gcc allows:
-         *    static int sun1(); int sun1() { return 0; }
-         * and:
-         *    static int sun2() { return 0; } int sun2();
-         * Both produce a static function.
-         *
-         * Both of these should fail:
-         *    int sun3(); static int sun3() { return 0; }
-         * and:
-         *    int sun4() { return 0; } static int sun4();
-         */
-        // if adding `static`
-        if (   fd.storage_class & STC.static_ &&
-            !(fd2.storage_class & STC.static_))
-        {
-            return collision();
-        }
-
-        if (fd.fbody && fd2.fbody)
-            return collision();         // can't both have bodies
-
-        mangleWrangle(fd2, fd);
-
-        if (fd.fbody)                   // fd is the definition
-        {
-            if (log) printf(" replace existing with new\n");
-            sds.symtab.update(fd);      // replace fd2 in symbol table with fd
-            fd.overnext = fd2;
-
-            /* If fd2 is covering a tag symbol, then fd has to cover the same one
-             */
-            auto ps = cast(void*)fd2 in sc._module.tagSymTab;
-            if (ps)
-                sc._module.tagSymTab[cast(void*)fd] = *ps;
-
-            return fd;
-        }
-
-        /* Just like with VarDeclaration, the types should match, which needs semantic() to be run on it.
-         * FuncDeclaration::semantic() detects this, but it relies on .overnext being set.
-         */
-        fd2.overloadInsert(fd);
-
-        return fd2;
-    }
-
-    auto td  = s.isAliasDeclaration();  // new declaration
-    auto td2 = s2.isAliasDeclaration(); // existing declaration
-    if (td && td2)
-    {
-        /* BUG: just like with variables and functions, the types should match, which needs semantic() to be run on it.
-         * FuncDeclaration::semantic2() can detect this, but it relies overnext being set.
-         */
-        return td2;
-    }
-
-    return collision();
 }

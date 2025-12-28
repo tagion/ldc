@@ -58,7 +58,9 @@
 #include <cassert>
 #include <cstdio>
 
-TypeInfoDeclaration *getOrCreateTypeInfoDeclaration(const Loc &loc, Type *forType) {
+using namespace dmd;
+
+TypeInfoDeclaration *getOrCreateTypeInfoDeclaration(Loc loc, Type *forType) {
   IF_LOG Logger::println("getOrCreateTypeInfoDeclaration(): %s",
                          forType->toChars());
   LOG_SCOPE
@@ -146,12 +148,12 @@ public:
 
     // void[] init
     // the array is null if the default initializer is zero
-    if (!sd->members || decl->tinfo->isZeroInit(decl->loc)) {
+    if (!sd->members || isZeroInit(decl->tinfo, decl->loc)) {
       b.push_null_void_array();
     }
     // otherwise emit a void[] with the default initializer
     else {
-      Expression *defaultval = sd->getDefaultValue(decl->loc);
+      Expression *defaultval = getDefaultValue(sd, decl->loc);
       LLConstant *c = toConstElem(defaultval, gIR);
       b.push_void_array(c, sd->memtype, sd);
     }
@@ -228,6 +230,15 @@ public:
 
     // key typeinfo
     b.push_typeinfo(tc->index);
+
+    // entry typeinfo (key-value pair)
+    b.push_typeinfo(decl->entry);
+
+    // xopEquals function pointer
+    b.push_funcptr(decl->xopEqual->isFuncDeclaration());
+
+    // xtoHash function pointer
+    b.push_funcptr(decl->xtoHash->isFuncDeclaration());
 
     // finish
     b.finalize(gvar);
@@ -343,7 +354,7 @@ public:
 
     RTTIBuilder b(getConstTypeInfoType());
     // TypeInfo base
-    b.push_typeinfo(merge(decl->tinfo->mutableOf()));
+    b.push_typeinfo(merge(mutableOf(decl->tinfo)));
     // finish
     b.finalize(gvar);
   }
@@ -357,7 +368,7 @@ public:
 
     RTTIBuilder b(getInvariantTypeInfoType());
     // TypeInfo base
-    b.push_typeinfo(merge(decl->tinfo->mutableOf()));
+    b.push_typeinfo(merge(mutableOf(decl->tinfo)));
     // finish
     b.finalize(gvar);
   }
@@ -371,7 +382,7 @@ public:
 
     RTTIBuilder b(getSharedTypeInfoType());
     // TypeInfo base
-    b.push_typeinfo(merge(decl->tinfo->unSharedOf()));
+    b.push_typeinfo(merge(unSharedOf(decl->tinfo)));
     // finish
     b.finalize(gvar);
   }
@@ -385,7 +396,7 @@ public:
 
     RTTIBuilder b(getInoutTypeInfoType());
     // TypeInfo base
-    b.push_typeinfo(merge(decl->tinfo->mutableOf()));
+    b.push_typeinfo(merge(mutableOf(decl->tinfo)));
     // finish
     b.finalize(gvar);
   }
@@ -445,7 +456,8 @@ void buildTypeInfo(TypeInfoDeclaration *decl) {
     // immutable on the D side, and e.g. synchronized() can be used on the
     // implicit monitor.
     const bool isConstant = false;
-    bool useDLLImport = isBuiltin && global.params.dllimport != DLLImport::none;
+    const bool useDLLImport =
+        isBuiltin && global.params.dllimport >= DLLImport::defaultLibsOnly;
     gvar = declareGlobal(decl->loc, gIR->module, type, irMangle, isConstant,
                          false, useDLLImport);
   }

@@ -30,6 +30,7 @@ else version (WatchOS)
 version (ARM)     version = ARM_Any;
 version (AArch64) version = ARM_Any;
 version (HPPA)    version = HPPA_Any;
+version (HPPA64)  version = HPPA_Any;
 version (MIPS32)  version = MIPS_Any;
 version (MIPS64)  version = MIPS_Any;
 version (PPC)     version = PPC_Any;
@@ -232,12 +233,12 @@ version (linux)
 
     extern (D)
     {
-        size_t CMSG_ALIGN( size_t len ) pure nothrow @nogc
+        size_t CMSG_ALIGN()( size_t len ) pure nothrow @nogc
         {
             return (len + size_t.sizeof - 1) & cast(size_t) (~(size_t.sizeof - 1));
         }
 
-        size_t CMSG_LEN( size_t len ) pure nothrow @nogc
+        size_t CMSG_LEN()( size_t len ) pure nothrow @nogc
         {
             return CMSG_ALIGN(cmsghdr.sizeof) + len;
         }
@@ -317,6 +318,7 @@ version (linux)
             SO_RCVLOWAT     = 0x1004,
             SO_RCVTIMEO     = 0x1006,
             SO_REUSEADDR    = 0x0004,
+            SO_REUSEPORT    = 0x0200,
             SO_SNDBUF       = 0x1001,
             SO_SNDLOWAT     = 0x1003,
             SO_SNDTIMEO     = 0x1005,
@@ -351,6 +353,7 @@ version (linux)
             SO_RCVLOWAT     = 0x1004,
             SO_RCVTIMEO     = 0x1006,
             SO_REUSEADDR    = 0x0004,
+            SO_REUSEPORT    = 0x0200,
             SO_SNDBUF       = 0x1001,
             SO_SNDLOWAT     = 0x1003,
             SO_SNDTIMEO     = 0x1005,
@@ -385,6 +388,7 @@ version (linux)
             SO_RCVLOWAT     = 16,
             SO_RCVTIMEO     = 18,
             SO_REUSEADDR    = 2,
+            SO_REUSEPORT    = 15,
             SO_SNDBUF       = 7,
             SO_SNDLOWAT     = 17,
             SO_SNDTIMEO     = 19,
@@ -454,6 +458,7 @@ version (linux)
             SO_RCVLOWAT     = 18,
             SO_RCVTIMEO     = 20,
             SO_REUSEADDR    = 2,
+            SO_REUSEPORT    = 15,
             SO_SNDBUF       = 7,
             SO_SNDLOWAT     = 19,
             SO_SNDTIMEO     = 21,
@@ -488,6 +493,7 @@ version (linux)
             SO_RCVLOWAT     = 18,
             SO_RCVTIMEO     = 20,
             SO_REUSEADDR    = 2,
+            SO_REUSEPORT    = 0x0200, //FIXME: the rest appear to be wrong
             SO_SNDBUF       = 7,
             SO_SNDLOWAT     = 19,
             SO_SNDTIMEO     = 21,
@@ -522,6 +528,7 @@ version (linux)
             SO_RCVLOWAT     = 18,
             SO_RCVTIMEO     = 20,
             SO_REUSEADDR    = 2,
+            SO_REUSEPORT    = 15,
             SO_SNDBUF       = 7,
             SO_SNDLOWAT     = 19,
             SO_SNDTIMEO     = 21,
@@ -556,6 +563,7 @@ version (linux)
             SO_RCVLOWAT     = 18,
             SO_RCVTIMEO     = 20,
             SO_REUSEADDR    = 2,
+            SO_REUSEPORT    = 15,
             SO_SNDBUF       = 7,
             SO_SNDLOWAT     = 19,
             SO_SNDTIMEO     = 21,
@@ -660,13 +668,13 @@ else version (Darwin)
 
     extern (D)
     {
-        socklen_t CMSG_ALIGN(socklen_t len) pure nothrow @nogc { return (len + socklen_t.sizeof - 1) & cast(socklen_t) (~(socklen_t.sizeof - 1)); }
-        socklen_t CMSG_SPACE(socklen_t len) pure nothrow @nogc { return CMSG_ALIGN(len) + CMSG_ALIGN(cmsghdr.sizeof); }
-        socklen_t CMSG_LEN(socklen_t len) pure nothrow @nogc { return CMSG_ALIGN(cmsghdr.sizeof) + len; }
+        socklen_t CMSG_ALIGN()(socklen_t len) pure nothrow @nogc { return (len + socklen_t.sizeof - 1) & cast(socklen_t) (~(socklen_t.sizeof - 1)); }
+        socklen_t CMSG_SPACE()(socklen_t len) pure nothrow @nogc { return CMSG_ALIGN(len) + CMSG_ALIGN(cmsghdr.sizeof); }
+        socklen_t CMSG_LEN()(socklen_t len) pure nothrow @nogc { return CMSG_ALIGN(cmsghdr.sizeof) + len; }
 
-        inout(ubyte)*   CMSG_DATA( return scope inout(cmsghdr)* cmsg ) pure nothrow @nogc { return cast(ubyte*)( cmsg + 1 ); }
+        inout(ubyte)*   CMSG_DATA()( return scope inout(cmsghdr)* cmsg ) pure nothrow @nogc { return cast(ubyte*)( cmsg + 1 ); }
 
-        inout(cmsghdr)* CMSG_FIRSTHDR( inout(msghdr)* mhdr ) pure nothrow @nogc
+        inout(cmsghdr)* CMSG_FIRSTHDR()( inout(msghdr)* mhdr ) pure nothrow @nogc
         {
             return ( cast(socklen_t)mhdr.msg_controllen >= cmsghdr.sizeof ? cast(inout(cmsghdr)*) mhdr.msg_control : cast(inout(cmsghdr)*) null );
         }
@@ -1547,6 +1555,7 @@ else version (Solaris)
         SO_RCVLOWAT     = 0x1004,
         SO_RCVTIMEO     = 0x1006,
         SO_REUSEADDR    = 0x0004,
+        SO_REUSEPORT    = 0x100e,
         SO_SNDBUF       = 0x1001,
         SO_SNDLOWAT     = 0x1003,
         SO_SNDTIMEO     = 0x1005,

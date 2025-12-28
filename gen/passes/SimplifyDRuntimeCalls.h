@@ -18,9 +18,6 @@ protected:
   llvm::AliasAnalysis *AA;
   llvm::LLVMContext *Context;
 
-  /// CastToCStr - Return V if it is an i8*, otherwise cast it to i8*.
-  llvm::Value *CastToCStr(llvm::Value *V, llvm::IRBuilder<> &B);
-
   /// EmitMemCpy - Emit a call to the memcpy function to the builder.  This
   /// always expects that the size has type 'intptr_t' and Dst/Src are pointers.
   llvm::Value *EmitMemCpy(llvm::Value *Dst, llvm::Value *Src, llvm::Value *Len, unsigned Align,
@@ -42,11 +39,6 @@ public:
                       llvm::AliasAnalysis &AA, llvm::IRBuilder<> &B);
 };
 
-/// ArraySetLengthOpt - remove libcall for arr.length = N if N <= arr.length
-struct LLVM_LIBRARY_VISIBILITY ArraySetLengthOpt : public LibCallOptimization {
-  llvm::Value *CallOptimizer(llvm::Function *Callee, llvm::CallInst *CI,
-                       llvm::IRBuilder<> &B) override; 
-};
 /// AllocationOpt - Common optimizations for various GC allocations.
 struct LLVM_LIBRARY_VISIBILITY AllocationOpt : public LibCallOptimization {
   llvm::Value *CallOptimizer(llvm::Function *Callee, llvm::CallInst *CI,
@@ -65,7 +57,6 @@ struct LLVM_LIBRARY_VISIBILITY SimplifyDRuntimeCalls {
   llvm::StringMap<LibCallOptimization *> Optimizations;
 
   // Array operations
-  ArraySetLengthOpt ArraySetLength;
   ArraySliceCopyOpt ArraySliceCopy;
 
   // GC allocations

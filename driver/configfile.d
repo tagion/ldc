@@ -12,16 +12,16 @@
 //===----------------------------------------------------------------------===//
 module driver.configfile;
 
+import dmd.globals;
 import dmd.root.array;
+import dmd.root.string : toDString, toCString, toCStringThen;
 import driver.config;
 import core.stdc.stdio;
-import core.stdc.string;
 
 
-string prepareBinDir(const(char)* binDir)
+string normalizeSlashes(const(char)* binDir)
 {
-    immutable len = strlen(binDir);
-    auto res = binDir[0 .. len].dup;
+    auto res = binDir.toDString.dup;
     foreach (ref c; res)
     {
         if (c == '\\') c = '/';
@@ -29,28 +29,33 @@ string prepareBinDir(const(char)* binDir)
     return cast(string)res; // assumeUnique
 }
 
-T findSetting(T)(GroupSetting[] sections, Setting.Type type, string name)
+void findArraySetting(GroupSetting[] sections, string name, scope void delegate(const ArraySetting as) callback)
 {
-    // lexically later sections dominate earlier ones
-    foreach_reverse (section; sections)
+    foreach (section; sections)
     {
         foreach (c; section.children)
         {
-            if (c.type == type && c.name == name)
-                return cast(T) c;
+            if (c.type == Setting.Type.array && c.name == name)
+            {
+                auto as = cast(ArraySetting) c;
+                callback(as);
+            }
         }
     }
-    return null;
 }
 
-ArraySetting findArraySetting(GroupSetting[] sections, string name)
+string findScalarSetting(GroupSetting[] sections, string name)
 {
-    return findSetting!ArraySetting(sections, Setting.Type.array, name);
-}
-
-ScalarSetting findScalarSetting(GroupSetting[] sections, string name)
-{
-    return findSetting!ScalarSetting(sections, Setting.Type.scalar, name);
+    string result = null;
+    foreach (section; sections)
+    {
+        foreach (c; section.children)
+        {
+            if (c.type == Setting.Type.scalar && c.name == name)
+                result = (cast(ScalarSetting) c).val;
+        }
+    }
+    return result;
 }
 
 string replace(string str, string pattern, string replacement)
@@ -96,6 +101,70 @@ unittest
     assert(replace(test4, pattern, "word") == "a word, yet other words");
 }
 
+struct CfgPaths
+{
+    string cfgBaseDir; /// ldc2.conf directory
+    string ldcBinaryDir; /// ldc2.exe binary dir
+
+    this(const(char)* cfPath, const(char)* binDir)
+    {
+        import dmd.root.filename: FileName;
+
+        cfgBaseDir = normalizeSlashes(FileName.path(cfPath));
+        ldcBinaryDir = normalizeSlashes(binDir);
+    }
+}
+
+string replacePlaceholders(string str, CfgPaths cfgPaths)
+{
+    return str
+        .replace("%%ldcbinarypath%%", cfgPaths.ldcBinaryDir)
+        .replace("%%ldcconfigpath%%", cfgPaths.cfgBaseDir)
+        .replace("%%ldcversion%%", cast(string) global.ldc_version);
+}
+
+/++ Check that a section only contains known config keys
+
+ ldc recognizes:
+ - switches
+ - post-switches
+ - lib-dirs
+ - rpath
++/
+void validateSettingNames(const GroupSetting group, const char* filePath) {
+    static void fail(const Setting setting, const char* filePath) {
+        string fmt(Setting.Type type) {
+            final switch(type) {
+                static foreach (mem; __traits(allMembers, Setting.Type))
+                case __traits(getMember, Setting.Type, mem):
+                    return mem;
+            }
+        }
+
+        import dmd.root.string : toDString;
+        string msg;
+        if (setting.type == Setting.Type.group)
+            msg = "Nested group " ~ setting.name ~ " is unsupported";
+        else
+            msg = "Unknown " ~ fmt(setting.type) ~ " setting named " ~ setting.name;
+
+        throw new Exception(msg);
+    }
+
+    alias ST = Setting.Type;
+    static immutable knownSettings = [
+        new Setting("switches", ST.array),
+        new Setting("post-switches", ST.array),
+        new Setting("lib-dirs", ST.array),
+        new Setting("rpath", ST.scalar),
+    ];
+    outer: foreach (setting; group.children) {
+        foreach (known; knownSettings)
+            if (setting.name == known.name && setting.type == known.type)
+                continue outer;
+        fail(setting, filePath);
+    }
+}
 
 extern(C++) struct ConfigFile
 {
@@ -111,14 +180,11 @@ private:
     Array!(const(char)*) _libDirs;
     const(char)* rpathcstr;
 
-    static bool sectionMatches(const(char)* section, const(char)* triple);
+    static bool sectionMatches(const(char)* section, const(char)* triple) nothrow;
 
     bool readConfig(const(char)* cfPath, const(char)* triple, const(char)* binDir)
     {
-        switches.setDim(0);
-        postSwitches.setDim(0);
-
-        immutable dBinDir = prepareBinDir(binDir);
+        const cfgPaths = CfgPaths(cfPath, binDir);
 
         try
         {
@@ -126,55 +192,46 @@ private:
             foreach (s; parseConfigFile(cfPath))
             {
                 if (s.type == Setting.Type.group &&
-                    (s.name == "default" || sectionMatches((s.name ~ '\0').ptr, triple)))
+                    (s.name == "default" || s.name.toCStringThen!(name => sectionMatches(name.ptr, triple))))
                 {
                     sections ~= cast(GroupSetting) s;
                 }
             }
 
-            if (sections.length == 0)
-            {
-                const dTriple = triple[0 .. strlen(triple)];
-                const dCfPath = cfPath[0 .. strlen(cfPath)];
-                throw new Exception("No matching section for triple '" ~ cast(string) dTriple
-                                    ~ "' in " ~ cast(string) dCfPath);
-            }
+            foreach (group; sections)
+                validateSettingNames(group, cfPath);
 
-            auto switches = findArraySetting(sections, "switches");
-            auto postSwitches = findArraySetting(sections, "post-switches");
-            if (!switches && !postSwitches)
+            void readArraySetting(GroupSetting[] sections, string name, ref Array!(const(char)*) output)
             {
-                const dCfPath = cfPath[0 .. strlen(cfPath)];
-                throw new Exception("Could not look up switches in " ~ cast(string) dCfPath);
-            }
-
-            void applyArray(ref Array!(const(char)*) output, ArraySetting input)
-            {
-                if (!input)
-                    return;
-
-                output.reserve(input.vals.length);
-                foreach (sw; input.vals)
+                void applyArray(const ArraySetting input)
                 {
-                    const finalSwitch = sw.replace("%%ldcbinarypath%%", dBinDir) ~ '\0';
-                    output.push(finalSwitch.ptr);
+                    if (!input.isAppending)
+                        output.setDim(0);
+
+                    output.reserve(input.vals.length);
+                    foreach (sw; input.vals)
+                    {
+                        const finalSwitch = sw.replacePlaceholders(cfgPaths).toCString;
+                        output.push(finalSwitch.ptr);
+                    }
                 }
+                findArraySetting(sections, name, &applyArray);
             }
 
-            applyArray(this.switches, switches);
-            applyArray(this.postSwitches, postSwitches);
-
-            auto libDirs = findArraySetting(sections, "lib-dirs");
-            applyArray(_libDirs, libDirs);
-
-            if (auto rpath = findScalarSetting(sections, "rpath"))
-                this.rpathcstr = (rpath.val.replace("%%ldcbinarypath%%", dBinDir) ~ '\0').ptr;
+            readArraySetting(sections, "switches", switches);
+            readArraySetting(sections, "post-switches", postSwitches);
+            readArraySetting(sections, "lib-dirs", _libDirs);
+            const rpath = findScalarSetting(sections, "rpath");
+            // A missing rpath => do nothing
+            // An empty rpath => clear the setting
+            if (rpath.ptr !is null)
+                this.rpathcstr = rpath.length == 0 ? null : rpath.replacePlaceholders(cfgPaths).toCString.ptr;
 
             return true;
         }
         catch (Exception ex)
         {
-            fprintf(stderr, "Error: %.*s\n", cast(int) ex.msg.length, ex.msg.ptr);
+            fprintf(stderr, "Error while reading config file: %s\n%.*s\n", cfPath, cast(int) ex.msg.length, ex.msg.ptr);
             return false;
         }
     }

@@ -4330,28 +4330,28 @@ void test14696(int len = 2)
     check({ foo(len >  2 ? null : (len != 2 ? null : makeS(1).get()       )       ); }, "makeS(1).get(1).foo.dtor(1).");
 
     // temporary in condition and throwing callee
-    // check({ fooThrow(len == 2 ?        makeS(1).get() : null); }, "makeS(1).get(1).fooThrow.dtor(1).");
-    // check({ fooThrow(len == 2 ? null : makeS(1).get()       ); }, "fooThrow.");
-    // check({ fooThrow(len != 2 ?        makeS(1).get() : null); }, "fooThrow.");
-    // check({ fooThrow(len != 2 ? null : makeS(1).get()       ); }, "makeS(1).get(1).fooThrow.dtor(1).");
+    check({ fooThrow(len == 2 ?        makeS(1).get() : null); }, "makeS(1).get(1).fooThrow.dtor(1).");
+    check({ fooThrow(len == 2 ? null : makeS(1).get()       ); }, "fooThrow.");
+    check({ fooThrow(len != 2 ?        makeS(1).get() : null); }, "fooThrow.");
+    check({ fooThrow(len != 2 ? null : makeS(1).get()       ); }, "makeS(1).get(1).fooThrow.dtor(1).");
 
     // temporary in nesting condititions and throwing callee
-    // check({ fooThrow(len >= 2 ?        (len == 2 ?        makeS(1).get() : null) : null); }, "makeS(1).get(1).fooThrow.dtor(1).");
-    // check({ fooThrow(len >= 2 ?        (len == 2 ? null : makeS(1).get()       ) : null); }, "fooThrow.");
-    // check({ fooThrow(len >= 2 ?        (len != 2 ?        makeS(1).get() : null) : null); }, "fooThrow.");
-    // check({ fooThrow(len >= 2 ?        (len != 2 ? null : makeS(1).get()       ) : null); }, "makeS(1).get(1).fooThrow.dtor(1).");
-    // check({ fooThrow(len >= 2 ? null : (len == 2 ?        makeS(1).get() : null)       ); }, "fooThrow.");
-    // check({ fooThrow(len >= 2 ? null : (len == 2 ? null : makeS(1).get()       )       ); }, "fooThrow.");
-    // check({ fooThrow(len >= 2 ? null : (len != 2 ?        makeS(1).get() : null)       ); }, "fooThrow.");
-    // check({ fooThrow(len >= 2 ? null : (len != 2 ? null : makeS(1).get()       )       ); }, "fooThrow.");
-    // check({ fooThrow(len >  2 ?        (len == 2 ?        makeS(1).get() : null) : null); }, "fooThrow.");
-    // check({ fooThrow(len >  2 ?        (len == 2 ? null : makeS(1).get()       ) : null); }, "fooThrow.");
-    // check({ fooThrow(len >  2 ?        (len != 2 ?        makeS(1).get() : null) : null); }, "fooThrow.");
-    // check({ fooThrow(len >  2 ?        (len != 2 ? null : makeS(1).get()       ) : null); }, "fooThrow.");
-    // check({ fooThrow(len >  2 ? null : (len == 2 ?        makeS(1).get() : null)       ); }, "makeS(1).get(1).fooThrow.dtor(1).");
-    // check({ fooThrow(len >  2 ? null : (len == 2 ? null : makeS(1).get()       )       ); }, "fooThrow.");
-    // check({ fooThrow(len >  2 ? null : (len != 2 ?        makeS(1).get() : null)       ); }, "fooThrow.");
-    // check({ fooThrow(len >  2 ? null : (len != 2 ? null : makeS(1).get()       )       ); }, "makeS(1).get(1).fooThrow.dtor(1).");
+    check({ fooThrow(len >= 2 ?        (len == 2 ?        makeS(1).get() : null) : null); }, "makeS(1).get(1).fooThrow.dtor(1).");
+    check({ fooThrow(len >= 2 ?        (len == 2 ? null : makeS(1).get()       ) : null); }, "fooThrow.");
+    check({ fooThrow(len >= 2 ?        (len != 2 ?        makeS(1).get() : null) : null); }, "fooThrow.");
+    check({ fooThrow(len >= 2 ?        (len != 2 ? null : makeS(1).get()       ) : null); }, "makeS(1).get(1).fooThrow.dtor(1).");
+    check({ fooThrow(len >= 2 ? null : (len == 2 ?        makeS(1).get() : null)       ); }, "fooThrow.");
+    check({ fooThrow(len >= 2 ? null : (len == 2 ? null : makeS(1).get()       )       ); }, "fooThrow.");
+    check({ fooThrow(len >= 2 ? null : (len != 2 ?        makeS(1).get() : null)       ); }, "fooThrow.");
+    check({ fooThrow(len >= 2 ? null : (len != 2 ? null : makeS(1).get()       )       ); }, "fooThrow.");
+    check({ fooThrow(len >  2 ?        (len == 2 ?        makeS(1).get() : null) : null); }, "fooThrow.");
+    check({ fooThrow(len >  2 ?        (len == 2 ? null : makeS(1).get()       ) : null); }, "fooThrow.");
+    check({ fooThrow(len >  2 ?        (len != 2 ?        makeS(1).get() : null) : null); }, "fooThrow.");
+    check({ fooThrow(len >  2 ?        (len != 2 ? null : makeS(1).get()       ) : null); }, "fooThrow.");
+    check({ fooThrow(len >  2 ? null : (len == 2 ?        makeS(1).get() : null)       ); }, "makeS(1).get(1).fooThrow.dtor(1).");
+    check({ fooThrow(len >  2 ? null : (len == 2 ? null : makeS(1).get()       )       ); }, "fooThrow.");
+    check({ fooThrow(len >  2 ? null : (len != 2 ?        makeS(1).get() : null)       ); }, "fooThrow.");
+    check({ fooThrow(len >  2 ? null : (len != 2 ? null : makeS(1).get()       )       ); }, "makeS(1).get(1).fooThrow.dtor(1).");
 
     // temporaries in each conditions
     check({ foo(len == 2 ? makeS(1).get() : null, len == 2 ? makeS(2).get() : null); }, "makeS(1).get(1).makeS(2).get(2).foo.dtor(2).dtor(1).");
@@ -4849,6 +4849,22 @@ void test24010()
 }
 
 /**********************************/
+extern (C) struct S21303
+{
+    static bool dtorCalled = false;
+
+    ~this() { dtorCalled = true; }
+}
+
+void test21303()
+{
+    {
+        S21303 s;
+    }
+    assert(S21303.dtorCalled);
+}
+
+/**********************************/
 
 int main()
 {
@@ -4990,6 +5006,7 @@ int main()
     test68();
     testPR12012();
     test24010();
+    test21303();
 
     printf("Success\n");
     return 0;

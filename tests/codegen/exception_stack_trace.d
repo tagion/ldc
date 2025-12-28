@@ -1,4 +1,4 @@
-// RUN: %ldc -g -frame-pointer=all -link-defaultlib-debug %s -of=%t%exe
+// RUN: %ldc -g %s -of=%t%exe
 // RUN: %t%exe | FileCheck %s
 
 void bar()
@@ -21,7 +21,7 @@ void main()
     {
         import core.stdc.stdio;
         auto s = e.toString();
-        printf("%.*s\n", s.length, s.ptr);
+        printf("%.*s\n", cast(int) s.length, s.ptr);
     }
 }
 

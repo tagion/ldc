@@ -83,7 +83,7 @@ void TryCatchScope::emitCatchBodies(IRState &irs, llvm::Value *ehPtrSlot) {
     const auto enterCatchFn = getRuntimeFunction(
         c->loc, irs.module,
         isCPPclass ? "__cxa_begin_catch" : "_d_eh_enter_catch");
-    const auto ptr = DtoLoad(getVoidPtrType(), ehPtrSlot);
+    const auto ptr = DtoLoad(getOpaquePtrType(), ehPtrSlot);
     const auto throwableObj = irs.ir->CreateCall(enterCatchFn, ptr);
 
     // For catches that use the Throwable object, create storage for it.
@@ -92,7 +92,7 @@ void TryCatchScope::emitCatchBodies(IRState &irs, llvm::Value *ehPtrSlot) {
     if (c->var) {
       // This will alloca if we haven't already and take care of nested refs
       // if there are any.
-      DtoDeclarationExp(c->var);
+      DtoVarDeclaration(c->var);
 
       // Copy the exception reference over from the _d_eh_enter_catch return
       // value.
@@ -112,7 +112,7 @@ void TryCatchScope::emitCatchBodies(IRState &irs, llvm::Value *ehPtrSlot) {
        * exception handler. At some point should try to do better.
        */
       FuncDeclaration *fdend =
-          FuncDeclaration::genCfunc(nullptr, Type::tvoid, "__cxa_end_catch");
+          dmd::genCfunc(nullptr, Type::tvoid, "__cxa_end_catch");
       Expression *efunc = VarExp::create(Loc(), fdend);
       Expression *ecall = CallExp::create(Loc(), efunc);
       ecall->type = Type::tvoid;
@@ -171,7 +171,7 @@ void TryCatchScope::emitCatchBodies(IRState &irs, llvm::Value *ehPtrSlot) {
       if (!ci) {
         const char *name = target.cpp.typeInfoMangle(p.cd);
         auto cpp_ti = declareGlobal(
-            p.cd->loc, irs.module, getVoidPtrType(), name,
+            p.cd->loc, irs.module, getOpaquePtrType(), name,
             /*isConstant*/ true, false, /*useDLLImport*/ p.cd->isExport());
 
         const auto cppTypeInfoPtrType = getCppTypeInfoPtrType();
@@ -214,7 +214,7 @@ void emitBeginCatchMSVC(IRState &irs, Catch *ctch,
     // catchpad
     const auto savedInsertPoint = irs.saveInsertPoint();
     irs.ir->SetInsertPoint(gIR->topallocapoint());
-    DtoDeclarationExp(var);
+    DtoVarDeclaration(var);
 
     // catch handler will be outlined, so always treat as a nested reference
     exnObj = getIrValue(var);
@@ -230,7 +230,7 @@ void emitBeginCatchMSVC(IRState &irs, Catch *ctch,
     exnObj = DtoAlloca(ctch->type, "exnObj");
   } else {
     // catch all
-    exnObj = LLConstant::getNullValue(getVoidPtrType());
+    exnObj = getNullPtr();
   }
 
   bool isCPPclass = false;
@@ -242,8 +242,8 @@ void emitBeginCatchMSVC(IRState &irs, Catch *ctch,
       clssInfo = getIrAggr(cd)->getClassInfoSymbol();
   } else {
     // catch all
-    typeDesc = LLConstant::getNullValue(getVoidPtrType());
-    clssInfo = LLConstant::getNullValue(DtoType(getClassInfoType()));
+    typeDesc = getNullPtr();
+    clssInfo = getNullPtr();
   }
 
   // "catchpad within %switch [TypeDescriptor, 0, &caughtObject]" must be
@@ -270,8 +270,7 @@ void emitBeginCatchMSVC(IRState &irs, Catch *ctch,
   if (!isCPPclass) {
     auto enterCatchFn =
         getRuntimeFunction(ctch->loc, irs.module, "_d_eh_enter_catch");
-    irs.CreateCallOrInvoke(enterCatchFn, DtoBitCast(exnObj, getVoidPtrType()),
-                           clssInfo);
+    irs.CreateCallOrInvoke(enterCatchFn, exnObj, clssInfo);
   }
 }
 }
@@ -525,6 +524,17 @@ void TryCatchFinallyScopes::pushCleanup(llvm::BasicBlock *beginBlock,
   landingPadsPerCleanupScope.emplace_back();
 }
 
+void TryCatchFinallyScopes::pushVarDtorCleanup(VarDeclaration *vd) {
+  llvm::BasicBlock *beginBB = irs.insertBB(llvm::Twine("dtor.") + vd->toChars());
+
+  const auto savedInsertPoint = irs.saveInsertPoint();
+
+  irs.ir->SetInsertPoint(beginBB);
+  toElemDtor(vd->edtor);
+
+  pushCleanup(beginBB, irs.scopebb());
+}
+
 void TryCatchFinallyScopes::popCleanups(CleanupCursor targetScope) {
   assert(targetScope <= currentCleanupScope());
   if (targetScope == currentCleanupScope())
@@ -663,7 +673,7 @@ TryCatchFinallyScopes::getLandingPadRef(CleanupCursor scope) {
 
 namespace {
   llvm::LandingPadInst *createLandingPadInst(IRState &irs) {
-    LLType *retType = LLStructType::get(LLType::getInt8PtrTy(irs.context()),
+    LLType *retType = LLStructType::get(getOpaquePtrType(),
                                         LLType::getInt32Ty(irs.context()));
     if (!irs.func()->hasLLVMPersonalityFn()) {
       irs.func()->setLLVMPersonalityFn(
@@ -730,9 +740,8 @@ llvm::BasicBlock *TryCatchFinallyScopes::emitLandingPad() {
 
       // "Call" llvm.eh.typeid.for, which gives us the eh selector value to
       // compare the landing pad selector value with.
-      llvm::Value *ehTypeId =
-          irs.ir->CreateCall(GET_INTRINSIC_DECL(eh_typeid_for),
-                             DtoBitCast(cb.classInfoPtr, getVoidPtrType()));
+      llvm::Value *ehTypeId = irs.ir->CreateCall(
+          GET_INTRINSIC_DECL(eh_typeid_for, cb.classInfoPtr->getType()), cb.classInfoPtr);
 
       // Compare the selector value from the unwinder against the expected
       // one and branch accordingly.
@@ -763,7 +772,7 @@ llvm::BasicBlock *TryCatchFinallyScopes::emitLandingPad() {
 
 llvm::AllocaInst *TryCatchFinallyScopes::getOrCreateEhPtrSlot() {
   if (!ehPtrSlot)
-    ehPtrSlot = DtoRawAlloca(getVoidPtrType(), 0, "eh.ptr");
+    ehPtrSlot = DtoRawAlloca(getOpaquePtrType(), 0, "eh.ptr");
   return ehPtrSlot;
 }
 
@@ -775,7 +784,7 @@ llvm::BasicBlock *TryCatchFinallyScopes::getOrCreateResumeUnwindBlock() {
     irs.ir->SetInsertPoint(resumeUnwindBlock);
 
     llvm::Function *resumeFn = getUnwindResumeFunction(Loc(), irs.module);
-    irs.ir->CreateCall(resumeFn, DtoLoad(getVoidPtrType(), getOrCreateEhPtrSlot()));
+    irs.ir->CreateCall(resumeFn, DtoLoad(getOpaquePtrType(), getOrCreateEhPtrSlot()));
     irs.ir->CreateUnreachable();
 
     irs.ir->SetInsertPoint(oldBB);
@@ -834,7 +843,7 @@ TryCatchFinallyScopes::runCleanupPad(CleanupCursor scope,
 
   // preparation to allocate some space on the stack where _d_enter_cleanup
   //  can place an exception frame (but not done here)
-  auto frame = getNullPtr(getVoidPtrType());
+  auto frame = getNullPtr();
 
   const auto savedInsertPoint = irs.saveInsertPoint();
 

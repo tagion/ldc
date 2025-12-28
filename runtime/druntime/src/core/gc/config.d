@@ -7,10 +7,12 @@
 
 module core.gc.config;
 
-import core.stdc.stdio;
 import core.internal.parseoptions;
+import core.stdc.stdio : printf;
 
 __gshared Config config;
+
+private __gshared bool _initialized;
 
 struct Config
 {
@@ -31,7 +33,9 @@ struct Config
 
     bool initialize()
     {
-        return initConfigOptions(this, "gcopt");
+        if (!_initialized)
+            _initialized = initConfigOptions(this, "gcopt");
+        return _initialized;
     }
 
     void help() @nogc nothrow

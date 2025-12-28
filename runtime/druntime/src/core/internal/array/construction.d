@@ -13,7 +13,7 @@ import core.internal.traits : Unqual;
 
 debug(PRINTF)
 {
-    import core.stdc.stdio;
+    import core.stdc.stdio : printf;
 }
 
 /**
@@ -46,9 +46,8 @@ Tarr _d_arrayctor(Tarr : T[], T)(return scope Tarr to, scope Tarr from, char* ma
     import core.lifetime : copyEmplace;
     import core.stdc.string : memcpy;
     import core.stdc.stdint : uintptr_t;
-    debug(PRINTF) import core.stdc.stdio : printf;
 
-    debug(PRINTF) printf("_d_arrayctor(from = %p,%d) size = %d\n", from.ptr, from.length, T.sizeof);
+    debug(PRINTF) printf("_d_arrayctor(from = %p,%zd) size = %zd\n", from.ptr, from.length, T.sizeof);
 
     void[] vFrom = (cast(void*) from.ptr)[0..from.length];
     void[] vTo = (cast(void*) to.ptr)[0..to.length];
@@ -66,7 +65,7 @@ Tarr _d_arrayctor(Tarr : T[], T)(return scope Tarr to, scope Tarr from, char* ma
 
     enforceRawArraysConformable("initialization", T.sizeof, vFrom, vTo);
 
-    static if (hasElaborateCopyConstructor!T)
+    static if (__traits(hasCopyConstructor, T))
     {
         size_t i;
         try
@@ -89,8 +88,30 @@ Tarr _d_arrayctor(Tarr : T[], T)(return scope Tarr to, scope Tarr from, char* ma
     }
     else
     {
-        // blit all elements at once
-        memcpy(cast(void*) to.ptr, from.ptr, to.length * T.sizeof);
+        if (to.length)
+        {
+            // blit all elements at once
+            memcpy(cast(void*) to.ptr, from.ptr, to.length * T.sizeof);
+
+            // call postblits if they exist
+            static if (__traits(hasPostblit, T))
+            {
+                import core.internal.lifetime : __doPostblit;
+                size_t i = 0;
+                try __doPostblit(to, i);
+                catch (Exception o)
+                {
+                    // Destroy, in reverse order, what we've constructed so far
+                    while (i--)
+                    {
+                        auto elem = cast(Unqual!T*) &to[i];
+                        destroy(*elem);
+                    }
+
+                    throw o;
+                }
+            }
+        }
     }
 
     return to;
@@ -339,69 +360,40 @@ void _d_arraysetctor(Tarr : T[], T)(scope Tarr p, scope ref T value) @trusted
  * Returns:
  *      newly allocated array
  */
-T[] _d_newarrayU(T)(size_t length, bool isShared=false) pure nothrow @nogc @trusted
+T[] _d_newarrayUPureNothrow(T)(size_t length, bool isShared=false) pure nothrow @trusted
 {
-    alias PureType = T[] function(size_t length, bool isShared) pure nothrow @nogc @trusted;
-    return (cast(PureType) &_d_newarrayUImpl!T)(length, isShared);
+    alias PureType = T[] function(size_t length, bool isShared) pure nothrow @trusted;
+    return (cast(PureType) &_d_newarrayU!T)(length, isShared);
 }
 
-T[] _d_newarrayUImpl(T)(size_t length, bool isShared=false) @trusted
+T[] _d_newarrayU(T)(size_t length, bool isShared=false) @trusted
 {
+    import core.checkedint : mulu;
     import core.exception : onOutOfMemoryError;
-    import core.internal.array.utils : __arrayStart, __setArrayAllocLength, __arrayAlloc;
+    import core.internal.traits : Unqual;
+    import core.internal.array.utils : __arrayAlloc;
+
+    alias UnqT = Unqual!T;
 
     size_t elemSize = T.sizeof;
-    size_t arraySize;
 
     debug(PRINTF) printf("_d_newarrayU(length = x%zu, size = %zu)\n", length, elemSize);
     if (length == 0 || elemSize == 0)
         return null;
 
-    version (D_InlineAsm_X86)
+    bool overflow = false;
+    const arraySize = mulu(elemSize, length, overflow);
+    if (!overflow)
     {
-        asm pure nothrow @nogc
+        if (auto arr = __arrayAlloc!UnqT(arraySize))
         {
-            mov     EAX, elemSize       ;
-            mul     EAX, length         ;
-            mov     arraySize, EAX      ;
-            jnc     Lcontinue           ;
+            debug(PRINTF) printf("p = %p\n", arr.ptr);
+            return (cast(T*) arr.ptr)[0 .. length];
         }
     }
-    else version (D_InlineAsm_X86_64)
-    {
-        asm pure nothrow @nogc
-        {
-            mov     RAX, elemSize       ;
-            mul     RAX, length         ;
-            mov     arraySize, RAX      ;
-            jnc     Lcontinue           ;
-        }
-    }
-    else
-    {
-        import core.checkedint : mulu;
 
-        bool overflow = false;
-        arraySize = mulu(elemSize, length, overflow);
-        if (!overflow)
-            goto Lcontinue;
-    }
-
-Loverflow:
     onOutOfMemoryError();
     assert(0);
-
-Lcontinue:
-    auto info = __arrayAlloc!T(arraySize);
-    if (!info.base)
-        goto Loverflow;
-    debug(PRINTF) printf("p = %p\n", info.base);
-
-    auto arrstart = __arrayStart(info);
-
-    __setArrayAllocLength!T(info, arraySize, isShared);
-
-    return (cast(T*) arrstart)[0 .. length];
 }
 
 /// ditto
@@ -471,16 +463,32 @@ unittest
 version (D_ProfileGC)
 {
     /**
-    * TraceGC wrapper around $(REF _d_newitemT, core,lifetime).
+    * TraceGC wrapper around $(REF _d_newarrayT, core,internal.array.construction).
     */
-    T[] _d_newarrayTTrace(T)(string file, int line, string funcname, size_t length, bool isShared) @trusted
+    T[] _d_newarrayTTrace(T)(size_t length, bool isShared, string file = __FILE__, int line = __LINE__, string funcname = __FUNCTION__) @trusted
     {
         version (D_TypeInfo)
         {
             import core.internal.array.utils : TraceHook, gcStatsPure, accumulatePure;
-            mixin(TraceHook!(T.stringof, "_d_newarrayT"));
+            mixin(TraceHook!("T", "_d_newarrayT"));
 
             return _d_newarrayT!T(length, isShared);
+        }
+        else
+            assert(0, "Cannot create new array if compiling without support for runtime type information!");
+    }
+
+    /**
+    * TraceGC wrapper around $(REF _d_newarrayU, core,internal.array.construction).
+    */
+    T[] _d_newarrayUTrace(T)(size_t length, bool isShared, string file = __FILE__, int line = __LINE__, string funcname = __FUNCTION__) @trusted
+    {
+        version (D_TypeInfo)
+        {
+            import core.internal.array.utils : TraceHook, gcStatsPure, accumulatePure;
+            mixin(TraceHook!("T", "_d_newarrayU"));
+
+            return _d_newarrayUPureNothrow!T(length, isShared);
         }
         else
             assert(0, "Cannot create new array if compiling without support for runtime type information!");
@@ -508,9 +516,9 @@ version (D_ProfileGC)
  * Returns:
  *    newly allocated array
  */
-Tarr _d_newarraymTX(Tarr : U[], T, U)(size_t[] dims, bool isShared=false) @trusted
+Tarr _d_newarraymTX(Tarr : U[], T, U)(scope size_t[] dims, bool isShared=false) @trusted
 {
-    debug(PRINTF) printf("_d_newarraymTX(dims.length = %d)\n", dims.length);
+    debug(PRINTF) printf("_d_newarraymTX(dims.length = %zd)\n", dims.length);
 
     if (dims.length == 0)
         return null;
@@ -519,31 +527,30 @@ Tarr _d_newarraymTX(Tarr : U[], T, U)(size_t[] dims, bool isShared=false) @trust
 
     void[] __allocateInnerArray(size_t[] dims)
     {
-        import core.internal.array.utils : __arrayStart, __setArrayAllocLength, __arrayAlloc;
+        import core.internal.array.utils : __arrayAlloc;
 
         auto dim = dims[0];
 
-        debug(PRINTF) printf("__allocateInnerArray(ti = %p, ti.next = %p, dim = %d, ndims = %d\n", ti, ti.next, dim, dims.length);
+        debug(PRINTF) printf("__allocateInnerArray(UnqT = %s, dim = %u, ndims = %u)\n", UnqT.stringof.ptr, cast(uint)dim, cast(uint)dims.length);
         if (dims.length == 1)
         {
             auto r = _d_newarrayT!UnqT(dim, isShared);
-            return *cast(void[]*)(&r);
+            return *cast(void[]*)&r;
         }
 
         auto allocSize = (void[]).sizeof * dim;
-        auto info = __arrayAlloc!UnqT(allocSize);
-        __setArrayAllocLength!UnqT(info, allocSize, isShared);
-        auto p = __arrayStart(info)[0 .. dim];
+        // the array-of-arrays holds pointers! Don't use UnqT here!
+        auto arr = __arrayAlloc!(void[])(allocSize);
 
         foreach (i; 0..dim)
         {
-            (cast(void[]*)p.ptr)[i] = __allocateInnerArray(dims[1..$]);
+            (cast(void[]*)arr.ptr)[i] = __allocateInnerArray(dims[1..$]);
         }
-        return p;
+        return arr.ptr[0 .. dim];
     }
 
     auto result = __allocateInnerArray(dims);
-    debug(PRINTF) printf("result = %llx\n", result.ptr);
+    debug(PRINTF) printf("result = %p\n", result.ptr);
 
     return (cast(U*) result.ptr)[0 .. dims[0]];
 }
@@ -576,21 +583,109 @@ unittest
     }
 }
 
+// Test 3-level array allocation (this uses different code paths).
+unittest
+{
+    int[][][] a = _d_newarraymTX!(int[][][], int)([3, 4, 5]);
+    int[5] zeros = 0;
+
+    assert(a.length == 3);
+    foreach(l2; a)
+    {
+        assert(l2.length == 4);
+        foreach(l3; l2)
+            assert(l3 == zeros[]);
+    }
+}
+
+// https://issues.dlang.org/show_bug.cgi?id=24436
+@system unittest
+{
+    import core.memory : GC;
+
+    int[][] a = _d_newarraymTX!(int[][], int)([2, 2]);
+
+    assert(!(GC.getAttr(a.ptr) & GC.BlkAttr.NO_SCAN));
+}
+
 version (D_ProfileGC)
 {
     /**
     * TraceGC wrapper around $(REF _d_newarraymT, core,internal,array,construction).
     */
-    Tarr _d_newarraymTXTrace(Tarr : U[], T, U)(string file, int line, string funcname, size_t[] dims, bool isShared=false) @trusted
+    Tarr _d_newarraymTXTrace(Tarr : U[], T, U)(scope size_t[] dims, bool isShared=false, string file = __FILE__, int line = __LINE__, string funcname = __FUNCTION__) @trusted
     {
         version (D_TypeInfo)
         {
             import core.internal.array.utils : TraceHook, gcStatsPure, accumulatePure;
-            mixin(TraceHook!(T.stringof, "_d_newarraymTX"));
+            mixin(TraceHook!("T", "_d_newarraymTX"));
 
             return _d_newarraymTX!(Tarr, T)(dims, isShared);
         }
         else
             assert(0, "Cannot create new multi-dimensional array if compiling without support for runtime type information!");
     }
+}
+
+
+/**
+Allocate an array literal
+
+Rely on the caller to do the initialization of the array.
+
+---
+int[] getArr()
+{
+    return [10, 20];
+    // auto res = cast(int*) _d_arrayliteralTX(typeid(int[]), 2);
+    // res[0] = 10;
+    // res[1] = 20;
+    // return res[0..2];
+}
+---
+
+Params:
+    T = unqualified type of array elements
+    length = `.length` of array literal
+
+Returns: pointer to allocated array
+*/
+void* _d_arrayliteralTX(T)(size_t length) @trusted pure nothrow
+{
+    const allocsize = length * T.sizeof;
+
+    if (allocsize == 0)
+        return null;
+    else
+    {
+        import core.memory : GC;
+        import core.internal.traits : hasIndirections, hasElaborateDestructor;
+        alias BlkAttr = GC.BlkAttr;
+
+        /* Same as in core.internal.array.utils.__typeAttrs!T,
+        *  but don't use a nested template function call here to avoid
+        *  possible linking errors.
+        */
+        uint attrs = BlkAttr.APPENDABLE;
+        static if (!hasIndirections!T)
+            attrs |= BlkAttr.NO_SCAN;
+        static if (is(T == struct) && hasElaborateDestructor!T)
+            attrs |= BlkAttr.FINALIZE;
+
+        return GC.malloc(allocsize, attrs, typeid(T));
+    }
+}
+
+version (D_ProfileGC)
+void* _d_arrayliteralTXTrace(T)(size_t length, string file = __FILE__, int line = __LINE__, string funcname = __FUNCTION__) @trusted pure nothrow
+{
+    version (D_TypeInfo)
+    {
+        import core.internal.array.utils : TraceHook, gcStatsPure, accumulatePure;
+        mixin(TraceHook!((T[]).stringof, "_d_arrayliteralTX"));
+
+        return _d_arrayliteralTX!T(length);
+    }
+    else
+        assert(0);
 }

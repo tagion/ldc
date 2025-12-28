@@ -5,7 +5,7 @@
  * Copyright: Copyright Martin Nowak 2012-2013.
  * License:   $(HTTP www.boost.org/LICENSE_1_0.txt, Boost License 1.0).
  * Authors:   Martin Nowak
- * Source: $(DRUNTIMESRC rt/_sections_linux.d)
+ * Source: $(DRUNTIMESRC rt/_sections_elf_shared.d)
  */
 
 module rt.sections_elf_shared;
@@ -24,6 +24,7 @@ else version (CRuntime_Musl) enum SharedELF = true;
 else version (FreeBSD) enum SharedELF = true;
 else version (NetBSD) enum SharedELF = true;
 else version (DragonFlyBSD) enum SharedELF = true;
+else version (CRuntime_Bionic) enum SharedELF = true;
 else version (CRuntime_UClibc) enum SharedELF = true;
 else enum SharedELF = false;
 
@@ -35,29 +36,42 @@ else enum IsWindows = false;
 
 static if (SharedELF || SharedDarwin || IsWindows):
 
+// debug = PRINTF;
+
 version (MIPS32)  version = MIPS_Any;
 version (MIPS64)  version = MIPS_Any;
 version (RISCV32) version = RISCV_Any;
 version (RISCV64) version = RISCV_Any;
 
-// debug = PRINTF;
+import core.internal.container.array;
+import core.internal.container.hashtab;
 import core.internal.elf.dl;
 import core.memory;
-import core.stdc.config;
-import core.stdc.stdio;
-import core.stdc.stdlib : calloc, exit, free, malloc, EXIT_FAILURE;
-import core.stdc.string : strlen;
+import core.stdc.config : c_ulong;
+import core.stdc.stdlib : calloc, free, malloc;
+version (Shared) import core.sync.mutex;
+import rt.deh;
+import rt.dmain2;
+import rt.minfo;
+import rt.util.utility : safeAssert;
+
+version (Posix)
+{
+    import core.sys.posix.pthread : pthread_mutex_destroy, pthread_mutex_init, pthread_mutex_lock, pthread_mutex_unlock;
+    import core.sys.posix.sys.types : pthread_mutex_t;
+}
+
 version (linux)
 {
-    import core.sys.linux.dlfcn;
-    import core.sys.linux.elf;
-    import core.sys.linux.link;
+    import core.sys.linux.dlfcn : Dl_info, dladdr, dlclose, dlinfo, dlopen, RTLD_DI_LINKMAP, RTLD_LAZY, RTLD_NOLOAD;
+    import core.sys.linux.elf : DT_AUXILIARY, DT_FILTER, DT_NEEDED, DT_STRTAB, PF_W, PF_X, PT_DYNAMIC, PT_LOAD, PT_TLS;
+    import core.sys.linux.link : ElfW, link_map;
 }
 else version (FreeBSD)
 {
-    import core.sys.freebsd.dlfcn;
-    import core.sys.freebsd.sys.elf;
-    import core.sys.freebsd.sys.link_elf;
+    import core.sys.freebsd.dlfcn : Dl_info, dladdr, dlclose, dlinfo, dlopen, RTLD_DI_LINKMAP, RTLD_LAZY, RTLD_NOLOAD;
+    import core.sys.freebsd.sys.elf : DT_AUXILIARY, DT_FILTER, DT_NEEDED, DT_STRTAB, PF_W, PF_X, PT_DYNAMIC, PT_LOAD, PT_TLS;
+    import core.sys.freebsd.sys.link_elf : ElfW, link_map;
 }
 else version (Darwin)
 {
@@ -74,33 +88,29 @@ else version (Darwin)
 }
 else version (NetBSD)
 {
-    import core.sys.netbsd.dlfcn;
-    import core.sys.netbsd.sys.elf;
-    import core.sys.netbsd.sys.link_elf;
+    import core.sys.netbsd.dlfcn : Dl_info, dladdr, dlclose, dlinfo, dlopen, RTLD_DI_LINKMAP, RTLD_LAZY, RTLD_NOLOAD;
+    import core.sys.netbsd.sys.elf : DT_AUXILIARY, DT_FILTER, DT_NEEDED, DT_STRTAB, PF_W, PF_X, PT_DYNAMIC, PT_LOAD, PT_TLS;
+    import core.sys.netbsd.sys.link_elf : ElfW, link_map;
 }
 else version (DragonFlyBSD)
 {
-    import core.sys.dragonflybsd.dlfcn;
-    import core.sys.dragonflybsd.sys.elf;
-    import core.sys.dragonflybsd.sys.link_elf;
+    import core.sys.dragonflybsd.dlfcn : Dl_info, dladdr, dlclose, dlinfo, dlopen, RTLD_DI_LINKMAP, RTLD_LAZY, RTLD_NOLOAD;
+    import core.sys.dragonflybsd.sys.elf : DT_AUXILIARY, DT_FILTER, DT_NEEDED, DT_STRTAB, PF_W, PF_X, PT_DYNAMIC, PT_LOAD, PT_TLS;
+    import core.sys.dragonflybsd.sys.link_elf : ElfW, link_map;
 }
 else version (Windows)
 {
     import core.sys.windows.winbase;
     import core.sys.windows.windef;
-    import rt.sections_win64 : IMAGE_DOS_HEADER, findImageSection, getModuleInfos;
+    import core.sys.windows.winnt : IMAGE_DOS_HEADER;
+    import rt.sections_win64 : findImageSection, getModuleInfos;
 }
 else
 {
     static assert(0, "unimplemented");
 }
-import rt.deh;
-import rt.dmain2;
-import rt.minfo;
-import core.internal.container.array;
-import core.internal.container.hashtab;
-import rt.util.utility : safeAssert;
-version (Shared) import core.sync.mutex;
+
+debug (PRINTF) import core.stdc.stdio : printf;
 
 alias DSO SectionGroup;
 struct DSO
@@ -148,7 +158,7 @@ struct DSO
 
 private:
 
-    invariant()
+    invariant
     {
         safeAssert(_moduleGroup.modules.length > 0, "No modules for DSO.");
         version (CRuntime_UClibc) {} else
@@ -208,11 +218,6 @@ private:
     }
 }
 
-/****
- * Boolean flag set to true while the runtime is initialized.
- */
-__gshared bool _isRuntimeInitialized;
-
 
 version (FreeBSD) private __gshared void* dummy_ref;
 version (DragonFlyBSD) private __gshared void* dummy_ref;
@@ -223,7 +228,6 @@ version (NetBSD) private __gshared void* dummy_ref;
  */
 void initSections() nothrow @nogc
 {
-    _isRuntimeInitialized = true;
     // reference symbol to support weak linkage
     version (FreeBSD) dummy_ref = &_d_dso_registry;
     version (DragonFlyBSD) dummy_ref = &_d_dso_registry;
@@ -236,7 +240,6 @@ void initSections() nothrow @nogc
  */
 void finiSections() nothrow @nogc
 {
-    _isRuntimeInitialized = false;
 }
 
 alias ScanDG = void delegate(void* pbeg, void* pend) nothrow;
@@ -277,7 +280,7 @@ version (Shared)
     // interface for core.thread to inherit loaded libraries
     void* pinLoadedLibraries() nothrow @nogc
     {
-        auto res = cast(Array!(ThreadDSO)*)calloc(1, Array!(ThreadDSO).sizeof);
+        auto res = cast(Array!(ThreadDSO)*).calloc(1, Array!(ThreadDSO).sizeof);
         res.length = _loadedDSOs.length;
         foreach (i, ref tdso; _loadedDSOs)
         {
@@ -491,7 +494,7 @@ else
 
 version (Darwin)
 {
-    extern(C) alias GetTLSAnchor = void* function() nothrow @nogc;
+    alias GetTLSAnchor = void* function() nothrow @nogc;
 }
 else version (Windows)
 {
@@ -612,7 +615,7 @@ package extern(C) void _d_dso_registry(void* arg)
         }
 
         // don't initialize modules before rt_init was called (see Bugzilla 11378)
-        if (_isRuntimeInitialized)
+        if (isRuntimeInitialized())
         {
             registerGCRanges(pdso);
             // rt_loadLibrary will run tls ctors, so do this only for dlopen
@@ -627,7 +630,7 @@ package extern(C) void _d_dso_registry(void* arg)
         *data._slot = null;
 
         // don't finalizes modules after rt_term was called (see Bugzilla 11378)
-        bool doFinalize = _isRuntimeInitialized;
+        bool doFinalize = isRuntimeInitialized();
         version (Shared) {} else version (Windows)
         {
             /* If a DLL with its own static druntime has been loaded via
@@ -1170,6 +1173,8 @@ else
 
 version (LDC)
 {
+    version (Android) version (X86) version = Android_X86;
+
     version (PPC)
     {
         extern(C) void* __tls_get_addr_opt(tls_index* ti) nothrow @nogc;
@@ -1179,6 +1184,11 @@ version (LDC)
     {
         extern(C) void* __tls_get_addr_opt(tls_index* ti) nothrow @nogc;
         alias __tls_get_addr = __tls_get_addr_opt;
+    }
+    else version (Android_X86) // extra underscore
+    {
+        extern(C) void* ___tls_get_addr(tls_index* ti) nothrow @nogc;
+        alias __tls_get_addr = ___tls_get_addr;
     }
     else
         extern(C) void* __tls_get_addr(tls_index* ti) nothrow @nogc;
@@ -1257,7 +1267,9 @@ void[] getTLSRange(size_t mod, size_t sz, size_t alignment) nothrow @nogc
 
             if (reference != start)
             {
+                import core.stdc.stdio : fprintf, stderr;
                 import core.stdc.stdlib : abort;
+
                 fprintf(stderr, "ERROR: getTLSRange mismatch - %p\n", start);
                 fprintf(stderr, "                          vs. %p\n", reference);
                 abort();

@@ -33,7 +33,7 @@ version (DRuntime_Use_Libunwind):
 // mechanism for Windows, so the bindings haven't been brought in yet.
 version (Posix):
 
-import core.stdc.inttypes;
+import core.stdc.inttypes : uintptr_t;
 
 extern(C):
 @nogc:
@@ -43,6 +43,7 @@ nothrow:
  * Bindings for libunwind.h
  */
 alias unw_word_t = uintptr_t;
+alias unw_regnum_t = int;
 
 ///
 struct unw_context_t
@@ -86,6 +87,14 @@ int unw_step(unw_cursor_t*);
 int unw_get_proc_info(unw_cursor_t*, unw_proc_info_t*);
 /// Get the name of the current procedure (function)
 int unw_get_proc_name(unw_cursor_t*, char*, size_t, unw_word_t*);
+/// Reads the value of register `reg` in the stack frame identified by cursor `cp` and stores the value in the word pointed to by `valp`.
+int unw_get_reg(unw_cursor_t* cp, unw_regnum_t reg, unw_word_t* valp);
+/// Architecture independent register numbers
+enum
+{
+    UNW_REG_IP = -1, // instruction pointer
+    UNW_REG_SP = -2, // stack pointer
+}
 
 private:
 
@@ -153,6 +162,57 @@ else version (RISCV64) // 32 is not supported
 {
     enum _LIBUNWIND_CONTEXT_SIZE = 64;
     enum _LIBUNWIND_CURSOR_SIZE = 76;
+}
+else version (LoongArch64)
+{
+    enum _LIBUNWIND_CONTEXT_SIZE = 65;
+    enum _LIBUNWIND_CURSOR_SIZE = 77;
+}
+else version (MIPS32)
+{
+    version (MIPS_O32)
+    {
+        version (MIPS_HardFloat)
+        {
+            enum _LIBUNWIND_CONTEXT_SIZE = 50;
+            enum _LIBUNWIND_CURSOR_SIZE = 57;
+        }
+        else
+        {
+            enum _LIBUNWIND_CONTEXT_SIZE = 18;
+            enum _LIBUNWIND_CURSOR_SIZE = 24;
+        }
+    }
+    else version (MIPS_N32)
+    {
+        version (MIPS_HardFloat)
+        {
+            enum _LIBUNWIND_CONTEXT_SIZE = 67;
+            enum _LIBUNWIND_CURSOR_SIZE = 74;
+        }
+        else
+        {
+            enum _LIBUNWIND_CONTEXT_SIZE = 35;
+            enum _LIBUNWIND_CURSOR_SIZE = 42;
+        }
+    }
+}
+else version (MIPS64)
+{
+    version (MIPS_N64)
+    {
+        version (MIPS_HardFloat)
+        {
+            enum _LIBUNWIND_CONTEXT_SIZE = 67;
+            enum _LIBUNWIND_CURSOR_SIZE = 79;
+        }
+        else
+        {
+            enum _LIBUNWIND_CONTEXT_SIZE = 35;
+            enum _LIBUNWIND_CURSOR_SIZE = 47;
+        }
+    }
+    else static assert(0, "MIPS_O64 not supported");
 }
 else
     static assert(0, "Platform not supported");

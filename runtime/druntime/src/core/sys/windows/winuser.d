@@ -2495,8 +2495,8 @@ extern (Windows) nothrow {
     alias NAMEENUMPROCW WINSTAENUMPROCW;
 }
 
-mixin DECLARE_HANDLE!("HDWP");
-mixin DECLARE_HANDLE!("HDEVNOTIFY");
+alias HDWP = HANDLE;
+alias HDEVNOTIFY = HANDLE;
 
 struct MENUGETOBJECTINFO {
     DWORD dwFlags;
@@ -3275,10 +3275,10 @@ struct MENUBARINFO {
     byte bf_; // Simulated bitfield
 //  BOOL  fBarFocused:1;
 //  BOOL  fFocused:1;
-    bool fBarFocused()       { return (bf_ & 1) == 1; }
-    bool fFocused()          { return (bf_ & 2) == 2; }
-    bool fBarFocused(bool b) { bf_ = cast(byte) ((bf_ & 0xFE) | b);           return b; }
-    bool fFocused(bool b)    { bf_ = cast(byte) (b ? (bf_ | 2) : bf_ & 0xFD); return b; }
+    bool fBarFocused()()       { return (bf_ & 1) == 1; }
+    bool fFocused()()          { return (bf_ & 2) == 2; }
+    bool fBarFocused()(bool b) { bf_ = cast(byte) ((bf_ & 0xFE) | b);           return b; }
+    bool fFocused()(bool b)    { bf_ = cast(byte) (b ? (bf_ | 2) : bf_ & 0xFD); return b; }
 }
 alias MENUBARINFO* PMENUBARINFO;
 
@@ -3848,7 +3848,7 @@ int GetMenuStringA(HMENU, UINT, LPSTR, int, UINT);
 int GetMenuStringW(HMENU, UINT, LPWSTR, int, UINT);
 BOOL GetMessageA(LPMSG, HWND, UINT, UINT);
 BOOL GetMessageW(LPMSG, HWND, UINT, UINT);
-LONG GetMessageExtraInfo();
+LPARAM GetMessageExtraInfo();
 DWORD GetMessagePos();
 LONG GetMessageTime();
 
@@ -4424,9 +4424,9 @@ int BroadcastSystemMessageW(DWORD, LPDWORD, UINT, WPARAM, LPARAM);
 UINT SendInput(UINT, LPINPUT, int);
 BOOL EnumDisplayMonitors(HDC, LPCRECT, MONITORENUMPROC, LPARAM);
 BOOL GetMonitorInfoA(HMONITOR, LPMONITORINFO);
-extern(D) BOOL GetMonitorInfoA(HMONITOR m, LPMONITORINFOEXA mi) { return GetMonitorInfoA(m, cast(LPMONITORINFO)mi); }
+extern(D) BOOL GetMonitorInfoA()(HMONITOR m, LPMONITORINFOEXA mi) { return GetMonitorInfoA(m, cast(LPMONITORINFO)mi); }
 BOOL GetMonitorInfoW(HMONITOR, LPMONITORINFO);
-extern(D) BOOL GetMonitorInfoW(HMONITOR m, LPMONITORINFOEXW mi) { return GetMonitorInfoW(m, cast(LPMONITORINFO)mi); }
+extern(D) BOOL GetMonitorInfoW()(HMONITOR m, LPMONITORINFOEXW mi) { return GetMonitorInfoW(m, cast(LPMONITORINFO)mi); }
 HMONITOR MonitorFromPoint(POINT, DWORD);
 HMONITOR MonitorFromRect(LPCRECT, DWORD);
 HMONITOR MonitorFromWindow(HWND, DWORD);

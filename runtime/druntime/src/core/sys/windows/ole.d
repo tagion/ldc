@@ -155,7 +155,7 @@ enum OLEOPT_UPDATE {
 // #endif
 }
 
-mixin DECLARE_HANDLE!("HOBJECT");
+alias HOBJECT = HANDLE;
 alias LONG_PTR LHSERVER, LHCLIENTDOC, LHSERVERDOC;
 
 struct OLEOBJECTVTBL {
@@ -283,7 +283,7 @@ struct OLESERVERDOC {
 }
 alias OLESERVERDOC* LPOLESERVERDOC;
 
-extern (Windows) {
+extern (Windows) nothrow @nogc {
     OLESTATUS OleDelete(LPOLEOBJECT);
     OLESTATUS OleRelease(LPOLEOBJECT);
     OLESTATUS OleSaveToStream(LPOLEOBJECT, LPOLESTREAM);

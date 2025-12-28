@@ -23,6 +23,8 @@
 #include "gen/to_string.h"
 #include "llvm/Support/MD5.h"
 
+using namespace dmd;
+
 namespace {
 
 // TODO: Disable hashing of symbols that are defined in libdruntime and
@@ -98,7 +100,7 @@ std::string hashSymbolName(llvm::StringRef name, Dsymbol *symb) {
 
 std::string getIRMangledName(FuncDeclaration *fdecl, LINK link) {
   std::string mangledName = mangleExact(fdecl);
-  if (fdecl->adFlags & 4) { // nounderscore
+  if (fdecl->noUnderscore()) {
     mangledName.insert(0, "\1");
   }
 
