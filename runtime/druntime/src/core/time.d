@@ -337,6 +337,17 @@ else version (Solaris) enum ClockType
     second = 6,
     threadCPUTime = 7,
 }
+else version (WASI) enum ClockType
+{
+    normal = 0,
+    bootTime = 1,
+    coarse = 2,
+    precise = 3,
+    processCPUTime = 4,
+    raw = 5,
+    second = 6,
+    threadCPUTime = 7,
+}
 else
 {
     // It needs to be decided (and implemented in an appropriate version branch
