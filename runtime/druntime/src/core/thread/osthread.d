@@ -3019,6 +3019,15 @@ else version (Posix)
         }
     }
 }
+else version (WASI)
+{
+    extern (C) int thread_cancelDisable() nothrow {
+        import core.sys.wasi.missing;
+        mixin WASIError;
+        //pragma(msg, wasi_error);
+        assert(0, wasi_error);
+    }
+}
 else
 {
     // NOTE: This is the only place threading versions are checked.  If a new
