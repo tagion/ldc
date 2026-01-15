@@ -145,6 +145,13 @@ version (CRuntime_Microsoft)
         }
     }
 }
+else version(WebAssembly)
+{
+    static assert(real.sizeof == double.sizeof);
+    extern(D) real strtold(scope inout(char)* nptr, scope inout(char)** endptr) {
+        return strtod(nptr, endptr);
+    }
+}
 else
 {
     static if (PPCUseIEEE128)
