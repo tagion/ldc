@@ -307,11 +307,6 @@ class ThreadBase
      */
     @property bool isRunning() nothrow @nogc
     {
-        version(WASI)
-        {
-            /// Threads not suppoted yet
-            return true;
-        }
         if (m_addr == m_addr.init)
             return false;
 
