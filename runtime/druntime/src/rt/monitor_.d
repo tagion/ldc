@@ -24,6 +24,9 @@ else version (Posix)
         pthread_mutexattr_settype;
     import core.sys.posix.sys.types : pthread_mutex_t, pthread_mutexattr_t;
 }
+else version (WASI) {
+    import core.sys.wasi.sys.types;
+}
 else
 {
     static assert(0, "Unsupported platform");

@@ -40,12 +40,6 @@ version (SystemZ) version = IBMZ_Any;
 version (X86)     version = X86_Any;
 version (X86_64)  version = X86_Any;
 
-version (WebAssembly) version = real_is_double;
-version (CRuntime_UClibc) version = real_is_double;
-version(real_is_double) {
-    static assert(double.sizeof == real.sizeof);
-}
-
 extern (C):
 @trusted: // All functions here operate on floating point and integer values only.
 nothrow:
@@ -3870,10 +3864,9 @@ else version (CRuntime_Bionic)
     /// Added since Lollipop
     pure real    fmal(real x, real y, real z);
 }
-else version (real_is_double)
+else version (CRuntime_UClibc)
 {
     // uClibc wraps 'long double' to double, so we do the same for 'real'
-    // LDC WebAssembly maps real to double, while Clang maps it to special (i64, i64) parameter
 
     ///
     double  acos(double x);

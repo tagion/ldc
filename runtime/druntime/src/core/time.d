@@ -92,7 +92,13 @@ else version (Posix)
     import core.sys.posix.sys.time : gettimeofday, timeval;
     import core.sys.posix.time : clock_getres, clock_gettime, CLOCK_MONOTONIC, timespec;
 }
+else version (WASI)
+{
+    import core.sys.wasi.sys.time : gettimeofday, timeval;
+    import core.sys.wasi.time : clock_getres, clock_gettime, CLOCK_MONOTONIC, timespec;
 
+
+}
 version (unittest) import core.stdc.stdio : printf;
 
 
@@ -2624,6 +2630,34 @@ extern(C) void _d_initMonoTime() @nogc nothrow
             }
         }
     }
+    else version (WASI)
+    {
+        timespec ts;
+        foreach (i, typeStr; __traits(allMembers, ClockType))
+        {
+            static if (typeStr != "second")
+            {
+                enum clockArg = _posixClock(__traits(getMember, ClockType, typeStr));
+                if (clock_getres(clockArg, &ts) == 0)
+                {
+                    // ensure we are only writing immutable data once
+                    if (tps[i] != 0)
+                        // should only be called once
+                        assert(0);
+
+                    // For some reason, on some systems, clock_getres returns
+                    // a resolution which is clearly wrong:
+                    //  - it's a millisecond or worse, but the time is updated
+                    //    much more frequently than that.
+                    //  - it's negative
+                    //  - it's zero
+                    // In such cases, we'll just use nanosecond resolution.
+                    tps[i] = ts.tv_sec != 0 || ts.tv_nsec <= 0 || ts.tv_nsec >= 1000
+                        ? 1_000_000_000L : 1_000_000_000L / ts.tv_nsec;
+                }
+            }
+        }
+    }
     else
         static assert(0, "Unsupported platform");
 }
@@ -2904,6 +2938,28 @@ deprecated:
             ticksPerSec = machTicksPerSecond();
         }
         else version (Posix)
+        {
+            static if (is(typeof(clock_gettime)))
+            {
+                timespec ts;
+
+                if (clock_getres(CLOCK_MONOTONIC, &ts) != 0)
+                    ticksPerSec = 0;
+                else
+                {
+                    //For some reason, on some systems, clock_getres returns
+                    //a resolution which is clearly wrong (it's a millisecond
+                    //or worse, but the time is updated much more frequently
+                    //than that). In such cases, we'll just use nanosecond
+                    //resolution.
+                    ticksPerSec = ts.tv_nsec >= 1000 ? 1_000_000_000
+                                                     : 1_000_000_000 / ts.tv_nsec;
+                }
+            }
+            else
+                ticksPerSec = 1_000_000;
+        }
+        else version (WASI)
         {
             static if (is(typeof(clock_gettime)))
             {
@@ -3496,7 +3552,7 @@ deprecated:
         }
         else version (WASI)
         {
-            import core.sys.wasm.missing;
+            import core.sys.wasi.missing;
             mixin WASIError;
             assert(0, wasi_error);
         }

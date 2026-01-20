@@ -1,5 +1,6 @@
 module rt.wasi;
 
+version(WASI):
 extern(C) void _d_throw_exception(Throwable o)
 {
     import core.sys.wasi.missing;

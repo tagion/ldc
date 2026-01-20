@@ -41,6 +41,12 @@ else version (Posix)
         pthread_cond_signal, pthread_cond_t, pthread_cond_timedwait, pthread_cond_wait;
     import core.sys.posix.time : timespec;
 }
+else version (WASI)
+{
+    import core.stdc.errno : EAGAIN, ETIMEDOUT;
+    import core.sync.config;
+    import core.sys.wasi.time : timespec;
+}
 else
 {
     static assert(false, "Platform not supported");

@@ -43,6 +43,10 @@ else version (Posix)
 {
     import core.stdc.string : strlen;
 }
+else version (WASI)
+{
+    import core.stdc.string : strlen;
+}
 
 // not sure why we can't define this in one place, but this is to keep this
 // module from importing core.runtime.
