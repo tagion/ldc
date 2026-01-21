@@ -582,6 +582,12 @@ package
             swapcontext( **(cast(ucontext_t***) oldp),
                           *(cast(ucontext_t**)  newp) );
         }
+        else version (WASI)
+        {
+            import core.sys.wasi.missing;
+            mixin WASIError;
+            assert(0, wasi_error);
+        }
         else
             static assert(0, "Not implemented");
     }
@@ -1027,6 +1033,12 @@ protected:
         version (Windows)
         {
             VirtualFree( m_pmem, 0, MEM_RELEASE );
+        }
+        else version (WASI)
+        {
+            import core.sys.wasi.missing;
+            mixin WASIError;
+            assert(0, wasi_error);
         }
         else
         {
@@ -1657,6 +1669,12 @@ protected:
             // NOTE: If ucontext is being used then the top of the stack will
             //       be a pointer to the ucontext_t struct for that fiber.
             push( cast(size_t) &m_utxt );
+        }
+        else version (WASI)
+        {
+            import core.sys.wasi.missing;
+            mixin WASIError;
+            assert(0, wasi_error);
         }
         else
             static assert(0, "Not implemented");

@@ -13,10 +13,7 @@ module rt.dso;
 pragma(LDC_no_moduleinfo); // not needed; avoid collision across shared druntime and other binaries
 
 import ldc.attributes : hidden;
-version(WASI)
-    import rt.sections_wasm;
-else
-    import rt.sections_elf_shared; // : CompilerDSOData, _d_dso_registry;
+import rt.sections_elf_shared; // : CompilerDSOData, _d_dso_registry;
 
 static if (is(CompilerDSOData)): // only for targets supporting rt.sections_elf_shared
 
@@ -54,7 +51,10 @@ version (PosixWASI)
         dsoData._minfo_end = &__stop___minfo;
         version (Darwin)
             dsoData._getTLSAnchor = &getTLSAnchor;
-
+        version(WASI) {
+            import core.stdc.stdio;
+            printf("WASI %s\n", &__FUNCTION__[0]);
+        }
         _d_dso_registry(&dsoData);
     }
 

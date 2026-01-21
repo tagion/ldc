@@ -2984,8 +2984,14 @@ deprecated:
         else
             static assert(0, "Unsupported platform");
 
-        if (ticksPerSec != 0)
+        if (ticksPerSec != 0) {
+            version (WASI) {
+                import core.stdc.stdio;
+                printf("TickDuration.currSystemTick fails here so we skip it\n");
+                return;
+            }
             appOrigin = TickDuration.currSystemTick;
+        }
     }
 
     version (CoreUnittest) unittest

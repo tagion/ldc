@@ -3262,7 +3262,13 @@ struct Gcx
         // is not yet registered in runtime (because allocating `new Thread` is
         // part of `thread_attachThis` implementation). In that case it is
         // better not to try actually collecting anything
-
+        version(WASI) {
+            import core.sys.wasi.missing;
+            mixin WASIError;
+            import core.stdc.stdio;
+            printf("WARRING:%s\n", &wasi_error[0]);
+            return 0;
+        }
         if (Thread.getThis() is null)
             return 0;
 
