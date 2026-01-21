@@ -805,7 +805,7 @@ class Thread : ThreadBase
             {
                 version (WASI)
                 {
-                    import core.sys.wasm.missing;
+                    import core.sys.wasi.missing;
                     mixin WASIError;
                     assert(0, wasi_error);
                 }
@@ -893,7 +893,7 @@ class Thread : ThreadBase
         }
         else version (WASI)
         {
-            import core.sys.wasm.missing;
+            import core.sys.wasi.missing;
             mixin WASIError;
             assert(0, wasi_error);
         }
@@ -1774,6 +1774,12 @@ in (fn)
             asm pure nothrow @nogc { ( "st.d $fp, %0") : "=m" (regs[17]); }
             asm pure nothrow @nogc { ( "st.d $sp, %0") : "=m" (sp); }
         }
+        else version (WASI)
+        {
+            import core.sys.wasi.missing;
+            mixin WASIError;
+            assert(0, wasi_error);
+        }
         else
         {
             static assert(false, "Architecture not supported.");
@@ -1969,6 +1975,12 @@ private extern(D) void* getStackBottom() nothrow @nogc
 
         thr_stksegment(&stk);
         return stk.ss_sp;
+    }
+    else version (WASI)
+    {
+        import core.sys.wasi.missing;
+        mixin WASIError;
+        assert(0, wasi_error);
     }
     else
         static assert(false, "Platform not supported.");
@@ -2521,6 +2533,12 @@ private extern (D) void resume(ThreadBase _t) nothrow @nogc
             t.m_curr.tstack = t.m_curr.bstack;
         }
     }
+    else version (WASI)
+    {
+        import core.sys.wasi.missing;
+        mixin WASIError;
+        assert(0, wasi_error);
+    }
     else
         static assert(false, "Platform not supported.");
 }
@@ -3024,7 +3042,6 @@ else version (WASI)
     extern (C) int thread_cancelDisable() nothrow {
         import core.sys.wasi.missing;
         mixin WASIError;
-        //pragma(msg, wasi_error);
         assert(0, wasi_error);
     }
 }
@@ -3240,6 +3257,14 @@ private
 ThreadID createLowLevelThread(void delegate() nothrow dg, uint stacksize = 0,
                               void delegate() nothrow cbDllUnload = null) nothrow @nogc
 {
+    version (WASI)
+    {
+        import core.sys.wasi.missing;
+        mixin WASIError;
+        assert(0, wasi_error);
+    }
+    else
+    {
     void delegate() nothrow* context = cast(void delegate() nothrow*)malloc(dg.sizeof);
     *context = dg;
 
@@ -3313,6 +3338,7 @@ ThreadID createLowLevelThread(void delegate() nothrow dg, uint stacksize = 0,
         ll_pThreads[ll_nThreads - 1].tid = tid;
     }
     return tid;
+    }
 }
 
 /**
